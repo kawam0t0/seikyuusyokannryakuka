@@ -211,13 +211,13 @@ export function InvoiceDashboard({
       row[0]  = "40101";  // A: csv_type
       row[1]  = "品目";    // B: 行形式
       row[29] = det.name; // AD: 品名（見出し行も含む）
+      row[37] = "10%";    // AL: 品目消費税率（3行目以降全行に設定）
       if (!det.isHeader) {
-        row[28] = det.date;                  // AC: 納品日
-        row[31] = String(det.unitPrice);     // AF: 単価
-        row[32] = String(det.qty);           // AG: 数量
-        row[35] = det.detail ?? "";          // AJ: 詳細
-        row[36] = String(det.amount);        // AK: 金額
-        row[37] = "10%";                     // AL: 品目消費税率
+        row[28] = det.date;              // AC: 納品日
+        row[31] = String(det.unitPrice); // AF: 単価
+        row[32] = String(det.qty);       // AG: 数量
+        row[35] = det.detail ?? "";      // AJ: 詳細
+        row[36] = String(det.amount);    // AK: 金額
       }
       return row;
     });
@@ -352,7 +352,7 @@ export function InvoiceDashboard({
   <div class="section-title">メンテナンス</div>
   ${d.maintenance.length === 0 && maintenanceAmount === 0 ? '<p class="no-data">該当データなし</p>' : `
   <table>
-    <thead><tr><th>日付</th><th>品名</th><th class="num">数量</th><th>備考</th><th class="num">金額</th></tr></thead>
+    <thead><tr><th>日付</th><th>品名</th><th class="num">�����量</th><th>備考</th><th class="num">金額</th></tr></thead>
     <tbody>${maintenanceRows}</tbody>
   </table>`}
 </div>
@@ -374,7 +374,7 @@ export function InvoiceDashboard({
         <td>ロイヤリティ</td>
         <td style="font-size:8.5px;color:#64748b;">
           現金売上(税抜) ${fmt(cashExTax)} ／
-          キャッシュレス(税抜) ${fmt(cashlessExTax)} ／
+          キャ���シュレス(税抜) ${fmt(cashlessExTax)} ／
           サブスク(税抜) ${fmt(memberExTax)}
         </td>
         <td class="num">${fmt(royaltyAmountExTax)}</td>
