@@ -20,53 +20,58 @@ export function HirockPdfImporter({ storeName, period, onImported }: Props) {
 
   const fmt = (v: number) => v > 0 ? `¥${v.toLocaleString("ja-JP")}` : "";
 
-  async function processPdf(file: File) {
+  async function processFiles(files: File[]) {
+    const pdfs = files.filter((f) => f.type === "application/pdf");
+    if (pdfs.length === 0) return;
+
     setStatus("parsing");
-    setMessage("Gemini AI がPDFを解析中...");
-    try {
-      // PDFはフォームデータとしてAPIルートに送信する。
-      // Server Action に大きなBase64を渡すと "Maximum array nesting exceeded" になるためAPIルート経由にする。
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("storeName", storeName);
-      formData.append("period", period);
+    const allRows: HirockRow[] = [];
+    const errors: string[] = [];
 
-      const res = await fetch("/api/parse-pdf", {
-        method: "POST",
-        body: formData,
-      });
+    for (let i = 0; i < pdfs.length; i++) {
+      const file = pdfs[i];
+      setMessage(`Gemini AI が解析中... (${i + 1} / ${pdfs.length}) ${file.name}`);
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("storeName", storeName);
+        formData.append("period", period);
 
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}));
-        throw new Error(json.error ?? `サーバーエラー (${res.status})`);
+        const res = await fetch("/api/parse-pdf", { method: "POST", body: formData });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json.error ?? `サーバーエラー (${res.status})`);
+        }
+        const json = await res.json();
+        const structured: HirockRow[] = json.rows ?? [];
+        allRows.push(...structured);
+      } catch (e) {
+        errors.push(`${file.name}: ${e instanceof Error ? e.message : "解析失敗"}`);
       }
-
-      const json = await res.json();
-      const structured: HirockRow[] = json.rows ?? [];
-
-      if (structured.length === 0) {
-        throw new Error("データを抽出できませんでした。PDFの内容を確認してください。");
-      }
-
-      setRows(structured);
-      setStatus("preview");
-      setMessage(`${structured.length}件のデータを検出しました。内容を確認して保存してください。`);
-    } catch (e) {
-      setStatus("error");
-      setMessage(e instanceof Error ? e.message : "エラーが発生しました");
     }
+
+    if (allRows.length === 0) {
+      setStatus("error");
+      setMessage(errors.length > 0 ? errors.join(" / ") : "データを抽出できませんでした。");
+      return;
+    }
+
+    setRows(allRows);
+    setStatus("preview");
+    const summary = `${pdfs.length}件のPDFから${allRows.length}件のデータを検出しました。内容を確認して保存してください。`;
+    setMessage(errors.length > 0 ? `${summary}（失敗: ${errors.join(" / ")}）` : summary);
   }
 
   function handleDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (file?.type === "application/pdf") processPdf(file);
+    const files = Array.from(e.dataTransfer.files);
+    processFiles(files);
   }
 
   function handleInput(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (file) processPdf(file);
+    const files = Array.from(e.target.files ?? []);
+    if (files.length > 0) processFiles(files);
   }
 
   function handleCellChange(i: number, key: keyof HirockRow, value: string) {
@@ -148,11 +153,12 @@ export function HirockPdfImporter({ storeName, period, onImported }: Props) {
             dragOver ? "border-primary bg-accent" : "border-border hover:border-primary/50 bg-muted/40"
           }`}
         >
-          <input ref={inputRef} type="file" accept=".pdf" className="hidden" onChange={handleInput} />
+          <input ref={inputRef} type="file" accept=".pdf" multiple className="hidden" onChange={handleInput} />
           <svg className="w-8 h-8 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
           </svg>
           <p className="text-sm text-muted-foreground">クリックまたはドラッグ＆ドロップでPDFを選択</p>
+          <p className="text-xs text-muted-foreground">複数ファイル同時選択可</p>
         </div>
       )}
 
