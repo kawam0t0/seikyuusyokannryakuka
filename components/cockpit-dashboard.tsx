@@ -38,17 +38,64 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
   const [errorMsg, setErrorMsg] = useState("");
   const [isPending, startTransition] = useTransition();
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
+  // 現金売上の手動編集用: key=インデックス, value=上書き金額
+  const [cashOverrides, setCashOverrides] = useState<Record<number, number>>({});
+
+  // 現金明細行（cashOverridesで上書き済み）削除済みインデックスを除外
+  const [deletedCashIndices, setDeletedCashIndices] = useState<Set<number>>(new Set());
+
+  const cashRows = useMemo(() => {
+    if (!summary) return [];
+    return summary.details
+      .filter((r) => r.category === "cash")
+      .map((r, i) => ({
+        ...r,
+        originalIndex: i,
+        editedAmount: cashOverrides[i] !== undefined ? cashOverrides[i] : r.amount,
+        deleted: deletedCashIndices.has(i),
+      }))
+      .filter((r) => !r.deleted);
+  }, [summary, cashOverrides, deletedCashIndices]);
+
+  // 抜けている日付・重複日付のアラート計算
+  const cashAlerts = useMemo(() => {
+    if (!summary || cashRows.length === 0) return { missing: [] as string[], duplicates: [] as string[] };
+    const match = summary.period?.match(/(\d{4})年(\d{1,2})月度/) ?? null;
+    if (!match) return { missing: [], duplicates: [] };
+    const year = parseInt(match[1]);
+    const month = parseInt(match[2]);
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const dateCounts: Record<string, number> = {};
+    cashRows.forEach((r) => {
+      const d = r.date ? r.date.replace(/\//g, "-") : "";
+      if (d) dateCounts[d] = (dateCounts[d] ?? 0) + 1;
+    });
+    const existingDates = new Set(Object.keys(dateCounts));
+    const missing: string[] = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateStr = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      if (!existingDates.has(dateStr)) missing.push(dateStr);
+    }
+    const duplicates = Object.entries(dateCounts).filter(([, cnt]) => cnt > 1).map(([d]) => d);
+    return { missing, duplicates };
+  }, [cashRows, summary]);
+
+  // 手動編集後の現金合計
+  const adjustedCash = useMemo(
+    () => cashRows.reduce((s, r) => s + r.editedAmount, 0),
+    [cashRows]
+  );
 
   const total = useMemo(
-    () => (summary ? summary.cash + summary.cashless + summary.member : 0),
-    [summary]
+    () => (summary ? adjustedCash + summary.cashless + summary.member : 0),
+    [summary, adjustedCash]
   );
   const royaltyAmount = useMemo(
     () => Math.floor(total * (royaltyRate / 100)),
     [total, royaltyRate]
   );
   const totalExTax = useMemo(() => Math.floor(total / 1.1), [total]);
-  const cashExTax = useMemo(() => Math.floor(summary ? summary.cash / 1.1 : 0), [summary]);
+  const cashExTax = useMemo(() => Math.floor(adjustedCash / 1.1), [adjustedCash]);
   const cashlessExTax = useMemo(() => Math.floor(summary ? summary.cashless / 1.1 : 0), [summary]);
   const memberExTax = useMemo(() => Math.floor(summary ? summary.member / 1.1 : 0), [summary]);
   const royaltyAmountExTax = useMemo(
@@ -64,6 +111,8 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
         try {
           const result = await fetchSalesSummary(store, period);
           setSummary(result);
+          setCashOverrides({});
+          setDeletedCashIndices(new Set());
           // 状態を AppShell に通知
           if (onStateChange) {
             onStateChange({
@@ -207,12 +256,12 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                   </span>
                 </div>
                 <p className="text-3xl font-bold text-foreground">
-                  {summary ? fmt(summary.cash) : "¥—"}
+                  {summary ? fmt(adjustedCash) : "¥—"}
                 </p>
                 {summary && (
                   <>
                     <p className="text-xs text-muted-foreground">
-                      全体の {pct(summary.cash)}%
+                      全体の {pct(adjustedCash)}%
                     </p>
                     <p className="text-xs text-muted-foreground">
                       税抜: {fmt(cashExTax)}
@@ -269,6 +318,99 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
               </div>
             </div>
 
+            {/* 現金売上 明細一覧（手動編集可） */}
+            {summary && cashRows.length > 0 && (
+              <div className="space-y-2">
+                {/* アラート：抜けている日付 */}
+                {cashAlerts.missing.length > 0 && (
+                  <div className="rounded-lg border border-yellow-300 bg-yellow-50 px-4 py-3 text-xs text-yellow-800">
+                    <span className="font-semibold">データが抜けている日付：</span>{" "}
+                    {cashAlerts.missing.join("、")}
+                  </div>
+                )}
+                {/* アラート：重複している日付 */}
+                {cashAlerts.duplicates.length > 0 && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
+                    <span className="font-semibold">同じ日のデータが複数あります：</span>{" "}
+                    {cashAlerts.duplicates.join("、")}（不要な行を削除してください）
+                  </div>
+                )}
+                <div className="rounded-lg border border-border bg-card overflow-hidden">
+                  <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full bg-green-500" />
+                      <span className="text-sm font-semibold text-foreground">現金売上 明細</span>
+                    </div>
+                    <span className="text-xs text-muted-foreground">金額は手動で修正できます</span>
+                  </div>
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-border bg-muted">
+                        <th className="px-4 py-2.5 text-left font-semibold text-muted-foreground">日付</th>
+                        <th className="px-4 py-2.5 text-left font-semibold text-muted-foreground">店舗名</th>
+                        <th className="px-4 py-2.5 text-right font-semibold text-muted-foreground">台数</th>
+                        <th className="px-4 py-2.5 text-right font-semibold text-muted-foreground">金額（編集可）</th>
+                        <th className="px-4 py-2.5 text-center font-semibold text-muted-foreground">削除</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cashRows.map((r, i) => {
+                        const isDup = cashAlerts.duplicates.includes(r.date?.replace(/\//g, "-") ?? "");
+                        return (
+                          <tr key={r.originalIndex} className={`border-b border-border ${isDup ? "bg-red-50" : i % 2 === 0 ? "bg-card" : "bg-muted/20"}`}>
+                            <td className={`px-4 py-2.5 tabular-nums ${isDup ? "text-red-700 font-semibold" : "text-foreground"}`}>{r.date}</td>
+                            <td className="px-4 py-2.5 text-foreground">{r.storeName}</td>
+                            <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{r.quantity ?? "—"}</td>
+                            <td className="px-4 py-2 text-right">
+                              <input
+                                type="number"
+                                min={0}
+                                value={r.editedAmount}
+                                onChange={(e) => {
+                                  const val = Math.max(0, parseInt(e.target.value) || 0);
+                                  setCashOverrides((prev) => ({ ...prev, [r.originalIndex]: val }));
+                                  if (summary && onStateChange) {
+                                    const newCash = cashRows.reduce((s, row, j) => s + (j === i ? val : row.editedAmount), 0);
+                                    const newTotal = newCash + summary.cashless + summary.member;
+                                    const newTotalExTax = Math.floor(newTotal / 1.1);
+                                    onStateChange({
+                                      selectedStore,
+                                      selectedPeriod,
+                                      royaltyAmountExTax: Math.floor(newTotalExTax * (royaltyRate / 100)),
+                                      cashExTax: Math.floor(newCash / 1.1),
+                                      cashlessExTax: Math.floor(summary.cashless / 1.1),
+                                      memberExTax: Math.floor(summary.member / 1.1),
+                                    });
+                                  }
+                                }}
+                                className="w-32 rounded border border-border bg-card px-2 py-1 text-right text-xs text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 tabular-nums"
+                              />
+                            </td>
+                            <td className="px-4 py-2 text-center">
+                              <button
+                                onClick={() => setDeletedCashIndices((prev) => new Set([...prev, r.originalIndex]))}
+                                className="rounded px-2 py-1 text-xs text-red-500 border border-red-200 hover:bg-red-50 transition"
+                              >
+                                削除
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t-2 border-border bg-muted/40">
+                        <td colSpan={4} className="px-4 py-2.5 text-xs font-semibold text-foreground">合計</td>
+                        <td className="px-4 py-2.5 text-right text-sm font-bold text-green-600 tabular-nums">
+                          ¥{adjustedCash.toLocaleString("ja-JP")}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+            )}
+
             {/* 総売上 + ロイヤリティ */}
             <div className="rounded-lg border border-border bg-card p-8 space-y-8">
               {/* 総売上 */}
@@ -294,7 +436,7 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                   ロイヤリティ率を選択
                 </p>
                 <div className="flex flex-wrap gap-3">
-                  {[1, 2, 3, 4, 5].map((rate) => (
+                  {[0, 1, 2, 3, 4, 5].map((rate) => (
                     <button
                       key={rate}
                       onClick={() => {

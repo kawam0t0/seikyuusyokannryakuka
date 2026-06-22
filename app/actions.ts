@@ -19,6 +19,7 @@ export type SalesSummary = {
   cashless: number;
   member: number;
   details: SalesRow[];
+  period: string;
 };
 
 // --------------------------------------------------------
@@ -182,6 +183,7 @@ export async function fetchSalesSummary(
     cashless: cashlessTotal,
     member: memberTotal,
     details,
+    period,
   };
 }
 

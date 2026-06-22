@@ -81,7 +81,9 @@ export function InvoiceDashboard({
   const hirockTotal = invoiceData?.hirock.reduce((s, r) => s + r.total, 0) ?? 0;
   // 行ごとの金額の合計
   const maintenanceAmount = Object.values(maintenancePrices).reduce((s, v) => s + v, 0);
-  const grandTotal = apikaTotal + maintenanceAmount + hirockTotal + royaltyAmountExTax;
+  // システム利用料：高崎棟高店のみ¥17,500、他は¥35,000
+  const systemFee = selectedStore.includes("高崎棟高") ? 17500 : 35000;
+  const grandTotal = apikaTotal + maintenanceAmount + hirockTotal + royaltyAmountExTax + systemFee;
 
   function handleCsvDownload() {
     if (!invoiceData || !selectedStore || !selectedPeriod) return;
@@ -131,6 +133,10 @@ export function InvoiceDashboard({
       details.push({ date: "", name: "【ロイヤリティ】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
       details.push({ date: billingDate, name: "ロイヤリティ", qty: 1, unitPrice: royaltyAmountExTax, amount: royaltyAmountExTax, detail: "詳細は別紙参照ください" });
     }
+
+    // システム利用料セクション
+    details.push({ date: "", name: "【システム利用料】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
+    details.push({ date: billingDate, name: "システム利用料", qty: 1, unitPrice: systemFee, amount: systemFee });
 
     const rowCount = details.length;
     const subtotal = grandTotal;
@@ -187,7 +193,9 @@ export function InvoiceDashboard({
     infoRow[0]  = rowCount > 0 ? "40101" : "";  // A: csv_type (明細がある場合)
     infoRow[1]  = "請求書";                       // B: 行形式
     infoRow[2]  = p?.name ?? "";                  // C: 取引先名称
-    infoRow[3]  = "請求についてのご連絡";           // D: 件名
+    // 件名: "2026年5月度" → "5月度請求について"
+    const periodLabel = selectedPeriod.replace(/^\d{4}年/, "");
+    infoRow[3]  = `${periodLabel}請求について`;      // D: 件名
     infoRow[4]  = billingDate;                    // E: 請求日（先月末）
     infoRow[5]  = dueDate;                        // F: お支払期限（今月末）
     infoRow[10] = String(subtotal);               // K: 小計
@@ -482,7 +490,22 @@ export function InvoiceDashboard({
           </InvoiceSection>
 
           {/* メンテナンス */}
-          <InvoiceSection title="メンテナンス" color="bg-blue-500" total={maintenanceAmount} isEmpty={!invoiceData || invoiceData.maintenance.length === 0}>
+          <InvoiceSection
+            title="メンテナンス"
+            color="bg-blue-500"
+            total={maintenanceAmount}
+            isEmpty={!invoiceData || invoiceData.maintenance.length === 0}
+            titleExtra={
+              <a
+                href="https://docs.google.com/spreadsheets/d/1eynNDQX-qPSKog67kU9RXKUpomc906QqwAAGzx4Sm-k/edit?usp=sharing"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-primary underline hover:opacity-75 transition ml-2"
+              >
+                部品価格表はこちら
+              </a>
+            }
+          >
             {invoiceData && invoiceData.maintenance.length > 0 && (
               <table className="w-full text-xs">
                 <thead>
@@ -583,11 +606,19 @@ export function InvoiceDashboard({
             )}
           </InvoiceSection>
 
+          {/* システム利用料 */}
+          <InvoiceSection title="システム利用料" color="bg-slate-500" total={systemFee} isEmpty={false}>
+            <div className="p-4 flex justify-between items-center">
+              <span className="text-sm text-foreground">システム利用料（月額）</span>
+              <span className="font-bold text-foreground tabular-nums">{fmt(systemFee)}</span>
+            </div>
+          </InvoiceSection>
+
           {/* 合計 */}
           <div className="rounded-lg border-2 border-foreground bg-card p-6 flex justify-between items-center">
             <div>
               <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">請求合計（税抜）</p>
-              <p className="text-xs text-muted-foreground mt-1">液剤代 + メンテナンス + 消耗品 + ロイヤリティ</p>
+              <p className="text-xs text-muted-foreground mt-1">液剤代 + メンテナンス + 消耗品 + ロイヤリティ + システム利用料</p>
             </div>
             <p className="text-4xl font-bold text-foreground tabular-nums">{fmt(grandTotal)}</p>
           </div>
@@ -598,13 +629,14 @@ export function InvoiceDashboard({
 }
 
 function InvoiceSection({
-  title, color, total, isEmpty, children,
+  title, color, total, isEmpty, children, titleExtra,
 }: {
   title: string;
   color: string;
   total?: number;
   isEmpty: boolean;
   children?: React.ReactNode;
+  titleExtra?: React.ReactNode;
 }) {
   const fmt = (v: number) => `¥${v.toLocaleString("ja-JP")}`;
   return (
@@ -613,6 +645,7 @@ function InvoiceSection({
         <div className="flex items-center gap-2">
           <span className={`w-2.5 h-2.5 rounded-full ${color}`} />
           <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+          {titleExtra}
         </div>
         {total !== undefined && (
           <span className="text-sm font-bold text-foreground tabular-nums">
