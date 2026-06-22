@@ -251,6 +251,7 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                   <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
                     サブスク売上
                   </span>
+                  <span className="text-xs text-muted-foreground">（前月分）</span>
                 </div>
                 <p className="text-3xl font-bold text-foreground">
                   {summary ? fmt(summary.member) : "¥—"}

@@ -49,6 +49,11 @@ export async function fetchSalesSummary(
   const year = parseInt(match[1], 10);
   const month = parseInt(match[2], 10);
 
+  // サブスク（MEMBER）は選択期間の1ヶ月前を対象とする
+  const memberDate = new Date(year, month - 2, 1); // month-2 = 1ヶ月前（0始まりのため）
+  const memberYear = memberDate.getFullYear();
+  const memberMonth = memberDate.getMonth() + 1;
+
   const sheets = getSheetsClient();
 
   // 3シートを並列取得
@@ -134,14 +139,20 @@ export async function fetchSalesSummary(
     });
   }
 
-  // ---- MEMBER: A=日付, B=店名, C=売上 ----
+  // ---- MEMBER: A=日付, B=店名, C=売上（選択期間の1ヶ月前を表示） ----
   let memberTotal = 0;
   const memberDetails: SalesRow[] = [];
   for (const row of memberRows) {
     const dateStr = (row[0] as string | undefined) ?? "";
     const store = (row[1] as string | undefined) ?? "";
     const amountStr = (row[2] as string | undefined) ?? "0";
-    if (!isTargetMonth(dateStr)) continue;
+    // サブスクは1ヶ月前の期間でフィルタ
+    const d2 = new Date(dateStr);
+    const isMemberMonth =
+      !isNaN(d2.getTime()) &&
+      d2.getFullYear() === memberYear &&
+      d2.getMonth() + 1 === memberMonth;
+    if (!isMemberMonth) continue;
     if (!matchStore(store)) continue;
     const amount = parseAmount(amountStr);
     memberTotal += amount;
