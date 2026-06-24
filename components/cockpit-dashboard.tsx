@@ -2,11 +2,10 @@
 
 import { useState, useMemo, useCallback, useTransition } from "react";
 import { ChevronDown } from "lucide-react";
-import { fetchSalesSummary, type SalesSummary } from "@/app/actions";
+import { fetchSalesSummary, deleteCashRow, updateCashRow, type SalesSummary } from "@/app/actions";
 import { CsvUploader } from "@/components/csv-uploader";
 import { DetailsTable } from "@/components/details-table";
 import { PdfExport } from "@/components/pdf-export";
-import { HirockPdfImporter } from "@/components/hirock-pdf-importer";
 
 // 2026年5月度 〜 2030年5月度 の全月を生成
 function generatePeriods(): string[] {
@@ -38,8 +37,20 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
   const [errorMsg, setErrorMsg] = useState("");
   const [isPending, startTransition] = useTransition();
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
-  // 現金売上の手動編集用: key=インデックス, value=上書き金額
-  const [cashOverrides, setCashOverrides] = useState<Record<number, number>>({});
+  // 現金売上の手動編集用: key=originalIndex, value=各フィールドの上書き値
+  type CashEdit = { date?: string; storeName?: string; quantity?: string; amount?: number };
+  const [cashOverrides, setCashOverrides] = useState<Record<number, CashEdit>>({});
+
+  const setCashField = (originalIndex: number, field: keyof CashEdit, value: string | number) => {
+    setCashOverrides((prev) => ({
+      ...prev,
+      [originalIndex]: { ...prev[originalIndex], [field]: value },
+    }));
+  };
+  // シートへ保存中の行インデックス
+  const [savingRows, setSavingRows] = useState<Set<number>>(new Set());
+  // 削除中の行インデックス
+  const [deletingRows, setDeletingRows] = useState<Set<number>>(new Set());
 
   // 現金明細行（cashOverridesで上書き済み）削除済みインデックスを除外
   const [deletedCashIndices, setDeletedCashIndices] = useState<Set<number>>(new Set());
@@ -48,12 +59,19 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
     if (!summary) return [];
     return summary.details
       .filter((r) => r.category === "cash")
-      .map((r, i) => ({
-        ...r,
-        originalIndex: i,
-        editedAmount: cashOverrides[i] !== undefined ? cashOverrides[i] : r.amount,
-        deleted: deletedCashIndices.has(i),
-      }))
+      .map((r, i) => {
+        const ov = cashOverrides[i] ?? {};
+        return {
+          ...r,
+          originalIndex: i,
+          editedDate: ov.date !== undefined ? ov.date : r.date,
+          editedStoreName: ov.storeName !== undefined ? ov.storeName : r.storeName,
+          editedQuantity: ov.quantity !== undefined ? ov.quantity : (r.quantity ?? ""),
+          editedAmount: ov.amount !== undefined ? ov.amount : r.amount,
+          deleted: deletedCashIndices.has(i),
+          isEdited: Object.keys(ov).length > 0,
+        };
+      })
       .filter((r) => !r.deleted);
   }, [summary, cashOverrides, deletedCashIndices]);
 
@@ -113,6 +131,8 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
           setSummary(result);
           setCashOverrides({});
           setDeletedCashIndices(new Set());
+          setSavingRows(new Set());
+          setDeletingRows(new Set());
           // 状態を AppShell に通知
           if (onStateChange) {
             onStateChange({
@@ -227,14 +247,6 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
         {/* CSV アップローダー */}
         <CsvUploader />
 
-        {/* 消耗品PDF取込み（HIROCKシート） */}
-        <div className="rounded-lg border border-border bg-card p-6">
-          <HirockPdfImporter
-            storeName={selectedStore}
-            period={selectedPeriod}
-          />
-        </div>
-
         {/* ローディングオーバーレイ */}
         {isPending && (
           <div className="flex items-center justify-center gap-3 rounded-lg border border-border bg-card/50 py-10 text-sm text-muted-foreground">
@@ -325,14 +337,14 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                 {cashAlerts.missing.length > 0 && (
                   <div className="rounded-lg border border-yellow-300 bg-yellow-50 px-4 py-3 text-xs text-yellow-800">
                     <span className="font-semibold">データが抜けている日付：</span>{" "}
-                    {cashAlerts.missing.join("、")}
+                    {cashAlerts.missing.join("・")}
                   </div>
                 )}
                 {/* アラート：重複している日付 */}
                 {cashAlerts.duplicates.length > 0 && (
                   <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
                     <span className="font-semibold">同じ日のデータが複数あります：</span>{" "}
-                    {cashAlerts.duplicates.join("、")}（不要な行を削除してください）
+                    {cashAlerts.duplicates.join("、")}（不要なデータを削除してください）
                   </div>
                 )}
                 <div className="rounded-lg border border-border bg-card overflow-hidden">
@@ -341,7 +353,7 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                       <span className="w-2.5 h-2.5 rounded-full bg-green-500" />
                       <span className="text-sm font-semibold text-foreground">現金売上 明細</span>
                     </div>
-                    <span className="text-xs text-muted-foreground">金額は手動で修正できます</span>
+                    <span className="text-xs text-muted-foreground">全項目を手動で修正できます</span>
                   </div>
                   <table className="w-full text-xs">
                     <thead>
@@ -349,26 +361,58 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                         <th className="px-4 py-2.5 text-left font-semibold text-muted-foreground">日付</th>
                         <th className="px-4 py-2.5 text-left font-semibold text-muted-foreground">店舗名</th>
                         <th className="px-4 py-2.5 text-right font-semibold text-muted-foreground">台数</th>
-                        <th className="px-4 py-2.5 text-right font-semibold text-muted-foreground">金額（編集可）</th>
+                        <th className="px-4 py-2.5 text-right font-semibold text-muted-foreground">金額</th>
+                        <th className="px-4 py-2.5 text-center font-semibold text-muted-foreground">保存</th>
                         <th className="px-4 py-2.5 text-center font-semibold text-muted-foreground">削除</th>
                       </tr>
                     </thead>
                     <tbody>
                       {cashRows.map((r, i) => {
-                        const isDup = cashAlerts.duplicates.includes(r.date?.replace(/\//g, "-") ?? "");
+                        const isDup = cashAlerts.duplicates.includes(r.editedDate?.replace(/\//g, "-") ?? "");
+                        const isSaving = savingRows.has(r.originalIndex);
+                        const isDeleting = deletingRows.has(r.originalIndex);
+                        const inputCls = (edited: boolean) =>
+                          `w-full rounded border px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20 ${edited ? "border-primary bg-primary/5" : "border-border bg-card"}`;
                         return (
                           <tr key={r.originalIndex} className={`border-b border-border ${isDup ? "bg-red-50" : i % 2 === 0 ? "bg-card" : "bg-muted/20"}`}>
-                            <td className={`px-4 py-2.5 tabular-nums ${isDup ? "text-red-700 font-semibold" : "text-foreground"}`}>{r.date}</td>
-                            <td className="px-4 py-2.5 text-foreground">{r.storeName}</td>
-                            <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{r.quantity ?? "—"}</td>
-                            <td className="px-4 py-2 text-right">
+                            {/* 日付 */}
+                            <td className="px-2 py-2">
+                              <input
+                                type="text"
+                                value={r.editedDate}
+                                onChange={(e) => setCashField(r.originalIndex, "date", e.target.value)}
+                                className={inputCls(cashOverrides[r.originalIndex]?.date !== undefined)}
+                                placeholder="YYYY/MM/DD"
+                              />
+                            </td>
+                            {/* 店舗名 */}
+                            <td className="px-2 py-2">
+                              <input
+                                type="text"
+                                value={r.editedStoreName}
+                                onChange={(e) => setCashField(r.originalIndex, "storeName", e.target.value)}
+                                className={inputCls(cashOverrides[r.originalIndex]?.storeName !== undefined)}
+                              />
+                            </td>
+                            {/* 台数 */}
+                            <td className="px-2 py-2">
+                              <input
+                                type="number"
+                                min={0}
+                                value={r.editedQuantity}
+                                onChange={(e) => setCashField(r.originalIndex, "quantity", e.target.value)}
+                                className={`${inputCls(cashOverrides[r.originalIndex]?.quantity !== undefined)} text-right tabular-nums`}
+                              />
+                            </td>
+                            {/* 金額 */}
+                            <td className="px-2 py-2">
                               <input
                                 type="number"
                                 min={0}
                                 value={r.editedAmount}
                                 onChange={(e) => {
                                   const val = Math.max(0, parseInt(e.target.value) || 0);
-                                  setCashOverrides((prev) => ({ ...prev, [r.originalIndex]: val }));
+                                  setCashField(r.originalIndex, "amount", val);
                                   if (summary && onStateChange) {
                                     const newCash = cashRows.reduce((s, row, j) => s + (j === i ? val : row.editedAmount), 0);
                                     const newTotal = newCash + summary.cashless + summary.member;
@@ -383,15 +427,69 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                                     });
                                   }
                                 }}
-                                className="w-32 rounded border border-border bg-card px-2 py-1 text-right text-xs text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 tabular-nums"
+                                className={`${inputCls(cashOverrides[r.originalIndex]?.amount !== undefined)} text-right tabular-nums`}
                               />
                             </td>
-                            <td className="px-4 py-2 text-center">
+                            {/* 保存ボタン */}
+                            <td className="px-2 py-2 text-center">
                               <button
-                                onClick={() => setDeletedCashIndices((prev) => new Set([...prev, r.originalIndex]))}
-                                className="rounded px-2 py-1 text-xs text-red-500 border border-red-200 hover:bg-red-50 transition"
+                                disabled={!r.isEdited || isSaving || !r.sheetRowIndex}
+                                onClick={async () => {
+                                  if (!r.sheetRowIndex) return;
+                                  setSavingRows((prev) => new Set([...prev, r.originalIndex]));
+                                  try {
+                                    await updateCashRow(
+                                      r.sheetRowIndex,
+                                      r.editedDate,
+                                      r.editedStoreName,
+                                      r.editedQuantity,
+                                      r.editedAmount
+                                    );
+                                    // 保存後: summaryの元データを確定値で更新しoverridesをクリア
+                                    setSummary((prev) => {
+                                      if (!prev) return prev;
+                                      return {
+                                        ...prev,
+                                        details: prev.details.map((d) =>
+                                          d.sheetRowIndex === r.sheetRowIndex
+                                            ? { ...d, date: r.editedDate, storeName: r.editedStoreName, quantity: r.editedQuantity, amount: r.editedAmount }
+                                            : d
+                                        ),
+                                      };
+                                    });
+                                    setCashOverrides((prev) => {
+                                      const next = { ...prev };
+                                      delete next[r.originalIndex];
+                                      return next;
+                                    });
+                                  } finally {
+                                    setSavingRows((prev) => { const s = new Set(prev); s.delete(r.originalIndex); return s; });
+                                  }
+                                }}
+                                className="rounded px-2 py-1 text-xs font-semibold border transition disabled:opacity-30 disabled:cursor-not-allowed border-primary text-primary hover:bg-primary/10 whitespace-nowrap"
                               >
-                                削除
+                                {isSaving ? "保存中" : "保存"}
+                              </button>
+                            </td>
+                            {/* 削除ボタン */}
+                            <td className="px-2 py-2 text-center">
+                              <button
+                                disabled={isDeleting || !r.sheetRowIndex}
+                                onClick={async () => {
+                                  if (!r.sheetRowIndex) return;
+                                  if (!confirm(`${r.editedDate} のデータをスプレッドシートから削除しますか？`)) return;
+                                  setDeletingRows((prev) => new Set([...prev, r.originalIndex]));
+                                  try {
+                                    await deleteCashRow(r.sheetRowIndex);
+                                    setDeletedCashIndices((prev) => new Set([...prev, r.originalIndex]));
+                                    loadSummary(selectedStore, selectedPeriod);
+                                  } finally {
+                                    setDeletingRows((prev) => { const s = new Set(prev); s.delete(r.originalIndex); return s; });
+                                  }
+                                }}
+                                className="rounded px-2 py-1 text-xs border border-red-200 text-red-500 hover:bg-red-50 transition disabled:opacity-30 disabled:cursor-not-allowed whitespace-nowrap"
+                              >
+                                {isDeleting ? "削除中" : "削除"}
                               </button>
                             </td>
                           </tr>
@@ -400,7 +498,7 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                     </tbody>
                     <tfoot>
                       <tr className="border-t-2 border-border bg-muted/40">
-                        <td colSpan={4} className="px-4 py-2.5 text-xs font-semibold text-foreground">合計</td>
+                        <td colSpan={5} className="px-4 py-2.5 text-xs font-semibold text-foreground">合計</td>
                         <td className="px-4 py-2.5 text-right text-sm font-bold text-green-600 tabular-nums">
                           ¥{adjustedCash.toLocaleString("ja-JP")}
                         </td>

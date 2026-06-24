@@ -157,6 +157,8 @@ export async function appendHirockRows(
 
 // --------------------------------------------------------
 // HIROCKシート読み込み（消耗品）
+// A=日付, B=店舗名, C=品目, D=サイズ, E=色, F=数量, G=単価
+// 合計計算: 数量が100以上の場合は単価をそのまま使用、未満は数量×単価
 // --------------------------------------------------------
 export async function fetchHirockRows(
   storeName: string,
@@ -170,7 +172,7 @@ export async function fetchHirockRows(
   const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: "HIROCK!A2:F",
+    range: "HIROCK!A2:G",
   });
   const rows = res.data.values ?? [];
 
@@ -179,11 +181,16 @@ export async function fetchHirockRows(
     return parseFloat(String(v).replace(/[¥,\s]/g, "")) || 0;
   }
 
+  // スラッシュ区切り日付（2026/06/15）をハイフン区切りに正規化してパース
+  function parseDate(dateStr: string): Date {
+    return new Date(dateStr.replace(/\//g, "-"));
+  }
+
   return rows
     .filter((row) => {
       const dateStr = (row[0] as string | undefined) ?? "";
       const store = (row[1] as string | undefined) ?? "";
-      const d = new Date(dateStr);
+      const d = parseDate(dateStr);
       if (isNaN(d.getTime())) return false;
       return (
         d.getFullYear() === year &&
@@ -192,9 +199,10 @@ export async function fetchHirockRows(
       );
     })
     .map((row) => {
-      const qty = parseNum(row[3]);
-      const unit = parseNum(row[4]);
-      const tot = parseNum(row[5]) || qty * unit;
+      const qty = parseNum(row[5]);   // F列: 数量
+      const unit = parseNum(row[6]);  // G列: 単価
+      // 数量100以上は単価をそのまま合計とする（枚数課金ではなく定額）
+      const tot = qty >= 100 ? unit : qty * unit;
       return {
         date: (row[0] as string) ?? "",
         storeName: (row[1] as string) ?? "",
@@ -244,6 +252,99 @@ export async function fetchPartnerInfo(storeName: string): Promise<PartnerInfo |
     title:   String(row[7]  ?? ""),
     contact: String(row[8]  ?? ""),
   };
+}
+
+// --------------------------------------------------------
+// SUPPORTシート（現場応援）
+// A=日付, B=店舗名, C=項目名, D=時間, E=単価, F=合計
+// --------------------------------------------------------
+export type SupportRow = {
+  date: string;
+  storeName: string;
+  itemName: string;
+  hours: number;
+  unitPrice: number;
+  total: number;
+};
+
+export async function fetchSupportRows(
+  storeName: string,
+  period: string
+): Promise<SupportRow[]> {
+  const match = period.match(/(\d{4})年(\d{1,2})月度/);
+  if (!match) return [];
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+
+  const sheets = getSheetsClient();
+  let rows: unknown[][] = [];
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "SUPPORT!A2:F",
+    });
+    rows = res.data.values ?? [];
+  } catch {
+    // SUPPORTシートが存在しない場合は空で返す
+    return [];
+  }
+
+  function parseNum(v: unknown): number {
+    if (!v) return 0;
+    return parseFloat(String(v).replace(/[¥,\s]/g, "")) || 0;
+  }
+
+  return rows
+    .filter((row) => {
+      const dateStr = (row[0] as string | undefined) ?? "";
+      const store = (row[1] as string | undefined) ?? "";
+      const d = new Date(dateStr.replace(/\//g, "-"));
+      if (isNaN(d.getTime())) return false;
+      return (
+        d.getFullYear() === year &&
+        d.getMonth() + 1 === month &&
+        store.includes(storeName)
+      );
+    })
+    .map((row) => {
+      const hours = parseNum(row[3]);
+      const unit = parseNum(row[4]);
+      const tot = parseNum(row[5]) || hours * unit;
+      return {
+        date: (row[0] as string) ?? "",
+        storeName: (row[1] as string) ?? "",
+        itemName: (row[2] as string) ?? "現場応援",
+        hours,
+        unitPrice: unit,
+        total: tot,
+      };
+    });
+}
+
+export async function appendSupportRows(
+  rows: SupportRow[]
+): Promise<{ appended: number }> {
+  if (rows.length === 0) return { appended: 0 };
+
+  const sheets = getSheetsClient();
+  const values = rows.map((r) => [
+    r.date,
+    r.storeName,
+    r.itemName,
+    r.hours,
+    r.unitPrice,
+    r.total,
+  ]);
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "SUPPORT!A:F",
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values },
+  });
+
+  return { appended: rows.length };
 }
 
 // --------------------------------------------------------

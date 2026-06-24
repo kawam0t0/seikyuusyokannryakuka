@@ -62,7 +62,8 @@ export function CsvUploader() {
 
       const result = await appendCashlessRows(merged);
       setStatus("done");
-      setMessage(`完了: ${result.appended} 行を CASHLESS シートに追記しました。`);
+      const skipMsg = result.skipped > 0 ? `（${result.skipped} 行は重複のためスキップ）` : "";
+      setMessage(`完了: ${result.appended} 行を CASHLESS シートに追記しました。${skipMsg}`);
     } catch (e) {
       console.error("[v0] CSV upload error:", e);
       setStatus("error");
@@ -99,7 +100,7 @@ export function CsvUploader() {
             キャッシュレスデータ インポート
           </h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            一度CHASHLESSシートに追加されているなら複数回する必要なし
+            複数CSVをアップロードして CASHLESS シートに反映（A列・V列・AE列・AG列を取得）
           </p>
         </div>
         {status !== "idle" && (

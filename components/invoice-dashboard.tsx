@@ -6,16 +6,20 @@ import {
   fetchMaintenanceRows,
   fetchHirockRows,
   fetchPartnerInfo,
+  fetchSupportRows,
+  appendSupportRows,
   type ApikaRow,
   type MaintenanceRow,
   type HirockRow,
   type PartnerInfo,
+  type SupportRow,
 } from "@/app/invoice-actions";
 
 type InvoiceData = {
   apika: ApikaRow[];
   maintenance: MaintenanceRow[];
   hirock: HirockRow[];
+  support: SupportRow[];
 };
 
 type Props = {
@@ -45,6 +49,13 @@ export function InvoiceDashboard({
   const [maintenancePrices, setMaintenancePrices] = useState<Record<number, number>>({});
   const [hirockRefreshKey, setHirockRefreshKey] = useState(0);
 
+  // 現場応援入力フォーム（複数行対応）
+  type SupportEntry = { date: string; itemName: string; hours: string; unitPrice: string };
+  const emptySupportEntry = (): SupportEntry => ({ date: "", itemName: "現場応援", hours: "", unitPrice: "1500" });
+  const [supportEntries, setSupportEntries] = useState<SupportEntry[]>([emptySupportEntry()]);
+  const [supportSaving, setSupportSaving] = useState(false);
+  const [supportMsg, setSupportMsg] = useState("");
+
   const fmt = (v: number) => `¥${v.toLocaleString("ja-JP")}`;
   const fmtNum = (v: number) => v > 0 ? `¥${v.toLocaleString("ja-JP")}` : "—";
 
@@ -53,13 +64,14 @@ export function InvoiceDashboard({
     setErrorMsg("");
     startTransition(async () => {
       try {
-        const [apika, maintenance, hirock, partner] = await Promise.all([
+        const [apika, maintenance, hirock, support, partner] = await Promise.all([
           fetchApikaRows(store, period),
           fetchMaintenanceRows(store, period),
           fetchHirockRows(store, period),
+          fetchSupportRows(store, period),
           fetchPartnerInfo(store),
         ]);
-        setInvoiceData({ apika, maintenance, hirock });
+        setInvoiceData({ apika, maintenance, hirock, support });
         setPartnerInfo(partner);
       } catch (e) {
         setErrorMsg(e instanceof Error ? e.message : "データ取得に失敗しました");
@@ -79,11 +91,38 @@ export function InvoiceDashboard({
 
   const apikaTotal = invoiceData?.apika.reduce((s, r) => s + r.total, 0) ?? 0;
   const hirockTotal = invoiceData?.hirock.reduce((s, r) => s + r.total, 0) ?? 0;
+  const supportTotal = invoiceData?.support.reduce((s, r) => s + r.total, 0) ?? 0;
   // 行ごとの金額の合計
   const maintenanceAmount = Object.values(maintenancePrices).reduce((s, v) => s + v, 0);
+  // メンテナンスデータがあるのに金額未入力（0）の行が1件でもある場合はCSV不可
+  const hasMaintenanceUnfilled = (invoiceData?.maintenance.length ?? 0) > 0 &&
+    invoiceData!.maintenance.some((_, i) => (maintenancePrices[i] ?? 0) === 0);
   // システム利用料：高崎棟高店のみ¥17,500、他は¥35,000
   const systemFee = selectedStore.includes("高崎棟高") ? 17500 : 35000;
-  const grandTotal = apikaTotal + maintenanceAmount + hirockTotal + royaltyAmountExTax + systemFee;
+  const grandTotal = apikaTotal + maintenanceAmount + hirockTotal + royaltyAmountExTax + systemFee + supportTotal;
+
+  async function handleSaveSupport() {
+    if (!selectedStore || !selectedPeriod) return;
+    const valid = supportEntries.filter((e) => e.date && e.hours && e.unitPrice);
+    if (valid.length === 0) { setSupportMsg("入力内容を確認してください。"); return; }
+    setSupportSaving(true);
+    setSupportMsg("保存中...");
+    try {
+      const rows: SupportRow[] = valid.map((e) => {
+        const hours = parseFloat(e.hours) || 0;
+        const unit = parseFloat(e.unitPrice) || 0;
+        return { date: e.date, storeName: selectedStore, itemName: e.itemName || "現場応援", hours, unitPrice: unit, total: hours * unit };
+      });
+      await appendSupportRows(rows);
+      setSupportMsg(`${rows.length} 件を保存しました。`);
+      setSupportEntries([emptySupportEntry()]);
+      loadInvoice(selectedStore, selectedPeriod);
+    } catch (e) {
+      setSupportMsg(e instanceof Error ? e.message : "保存に失敗しました。");
+    } finally {
+      setSupportSaving(false);
+    }
+  }
 
   function handleCsvDownload() {
     if (!invoiceData || !selectedStore || !selectedPeriod) return;
@@ -96,6 +135,8 @@ export function InvoiceDashboard({
     const fmtDate = (dt: Date) =>
       `${dt.getFullYear()}/${String(dt.getMonth() + 1).padStart(2, "0")}/${String(dt.getDate()).padStart(2, "0")}`;
     const billingDate = fmtDate(lastMonthEnd);
+    // 日付文字列をYYYY/MM/DD形式に統一（ハイフン区切りをスラッシュに変換）
+    const normalizeDate = (s: string) => s.replace(/-/g, "/");
     // 今月末日
     const thisMonthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
     const dueDate = fmtDate(thisMonthEnd);
@@ -107,7 +148,7 @@ export function InvoiceDashboard({
     // 液剤代セクション
     if (d.apika.length > 0) {
       details.push({ date: "", name: "【液剤代】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
-      d.apika.forEach((r) => details.push({ date: r.date, name: r.itemName, qty: r.quantity, unitPrice: r.unitPrice, amount: r.total }));
+      d.apika.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity, unitPrice: r.unitPrice, amount: r.total }));
     }
 
     // メンテナンスセクション
@@ -117,7 +158,7 @@ export function InvoiceDashboard({
       d.maintenance.forEach((r, i) => {
         const price = maintenancePrices[i] ?? 0;
         if (price > 0 || r.itemName) {
-          details.push({ date: r.date, name: r.itemName, qty: r.quantity || 1, unitPrice: price, amount: price });
+          details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity || 1, unitPrice: price, amount: price });
         }
       });
     }
@@ -125,13 +166,19 @@ export function InvoiceDashboard({
     // 消耗品セクション
     if (d.hirock.length > 0) {
       details.push({ date: "", name: "【消耗品】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
-      d.hirock.forEach((r) => details.push({ date: r.date, name: r.itemName, qty: r.quantity, unitPrice: r.unitPrice, amount: r.total }));
+      d.hirock.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity, unitPrice: r.unitPrice, amount: r.total }));
     }
 
     // ロイヤリティセクション
     if (royaltyAmountExTax > 0) {
       details.push({ date: "", name: "【ロイヤリティ】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
       details.push({ date: billingDate, name: "ロイヤリティ", qty: 1, unitPrice: royaltyAmountExTax, amount: royaltyAmountExTax, detail: "詳細は別紙参照ください" });
+    }
+
+    // 現場応援セクション
+    if (d.support.length > 0) {
+      details.push({ date: "", name: "【現場応援】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
+      d.support.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.hours, unitPrice: r.unitPrice, amount: r.total }));
     }
 
     // システム利用料セクション
@@ -426,15 +473,22 @@ export function InvoiceDashboard({
         </div>
         {invoiceData && (
           <div className="flex gap-2">
-            <button
-              onClick={handleCsvDownload}
-              className="flex items-center gap-2 rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-              </svg>
-              CSVダウンロード
-            </button>
+            <div className="flex flex-col items-end gap-1">
+              <button
+                onClick={handleCsvDownload}
+                disabled={hasMaintenanceUnfilled}
+                title={hasMaintenanceUnfilled ? "メンテナンスの金額をすべて入力してください" : undefined}
+                className="flex items-center gap-2 rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                CSVダウンロード
+              </button>
+              {hasMaintenanceUnfilled && (
+                <p className="text-xs text-red-500 font-medium">メンテナンスの金額をすべて入力してください</p>
+              )}
+            </div>
             <button
               onClick={handlePrint}
               className="flex items-center gap-2 rounded-lg border border-border bg-card px-5 py-2 text-sm font-semibold text-foreground hover:bg-muted transition"
@@ -518,29 +572,39 @@ export function InvoiceDashboard({
                   </tr>
                 </thead>
                 <tbody>
-                  {invoiceData.maintenance.map((r, i) => (
-                    <tr key={i} className={`border-b border-border ${i % 2 === 0 ? "bg-card" : "bg-muted/20"}`}>
-                      <td className="px-4 py-2.5 text-foreground tabular-nums">{r.date}</td>
-                      <td className="px-4 py-2.5 text-foreground">{r.itemName}</td>
-                      <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{r.quantity}</td>
-                      <td className="px-4 py-2.5 text-muted-foreground">{r.note}</td>
-                      <td className="px-4 py-2 text-right">
-                        <input
-                          type="number"
-                          min={0}
-                          value={maintenancePrices[i] ?? 0}
-                          onChange={(e) =>
-                            setMaintenancePrices((prev) => ({
-                              ...prev,
-                              [i]: Math.max(0, parseInt(e.target.value) || 0),
-                            }))
-                          }
-                          className="w-28 rounded border border-border bg-card px-2 py-1 text-right text-xs text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/20 tabular-nums"
-                          placeholder="0"
-                        />
-                      </td>
-                    </tr>
-                  ))}
+                  {invoiceData.maintenance.map((r, i) => {
+                    const priceVal = maintenancePrices[i] ?? 0;
+                    const isEmpty = priceVal === 0;
+                    return (
+                      <tr key={i} className={`border-b border-border ${isEmpty ? "bg-red-50" : i % 2 === 0 ? "bg-card" : "bg-muted/20"}`}>
+                        <td className="px-4 py-2.5 text-foreground tabular-nums">{r.date}</td>
+                        <td className="px-4 py-2.5 text-foreground">{r.itemName}</td>
+                        <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{r.quantity}</td>
+                        <td className="px-4 py-2.5 text-muted-foreground">{r.note}</td>
+                        <td className="px-4 py-2 text-right">
+                          <div className="flex flex-col items-end gap-1">
+                            <input
+                              type="number"
+                              min={0}
+                              value={priceVal === 0 ? "" : priceVal}
+                              onChange={(e) =>
+                                setMaintenancePrices((prev) => ({
+                                  ...prev,
+                                  [i]: Math.max(0, parseInt(e.target.value) || 0),
+                                }))
+                              }
+                              className={`w-28 rounded border px-2 py-1 text-right text-xs text-foreground focus:outline-none focus:ring-1 tabular-nums ${isEmpty ? "border-red-400 bg-red-50 focus:ring-red-300" : "border-border bg-card focus:border-primary focus:ring-primary/20"}`}
+                              placeholder="金額を入力"
+                              required
+                            />
+                            {isEmpty && (
+                              <span className="text-xs text-red-500 font-medium">金額の入力が必要です</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
                 <tfoot>
                   <tr className="border-t-2 border-border bg-muted/40">
@@ -606,6 +670,85 @@ export function InvoiceDashboard({
             )}
           </InvoiceSection>
 
+          {/* 現場応援 */}
+          <InvoiceSection title="現場応援" color="bg-orange-500" total={supportTotal} isEmpty={false}>
+            {/* 保存済みデータ表示 */}
+            {invoiceData && invoiceData.support.length > 0 && (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-muted/40">
+                    <th className="px-4 py-2 text-left font-semibold text-muted-foreground">日付</th>
+                    <th className="px-4 py-2 text-left font-semibold text-muted-foreground">項目名</th>
+                    <th className="px-4 py-2 text-right font-semibold text-muted-foreground">時間</th>
+                    <th className="px-4 py-2 text-right font-semibold text-muted-foreground">単価</th>
+                    <th className="px-4 py-2 text-right font-semibold text-muted-foreground">合計</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {invoiceData.support.map((r, i) => (
+                    <tr key={i} className={`border-b border-border ${i % 2 === 0 ? "bg-card" : "bg-muted/20"}`}>
+                      <td className="px-4 py-2.5 text-foreground tabular-nums">{r.date}</td>
+                      <td className="px-4 py-2.5 text-foreground">{r.itemName}</td>
+                      <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{r.hours}</td>
+                      <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{fmt(r.unitPrice)}</td>
+                      <td className="px-4 py-2.5 text-right font-semibold text-foreground tabular-nums">{fmt(r.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {/* 入力フォーム */}
+            <div className="p-4 space-y-3 border-t border-border">
+              <p className="text-xs font-semibold text-muted-foreground">新規追加</p>
+              {supportEntries.map((entry, i) => (
+                <div key={i} className="grid grid-cols-2 gap-2 sm:grid-cols-5 items-end">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs text-muted-foreground">日付</label>
+                    <input type="date" value={entry.date}
+                      onChange={(e) => setSupportEntries((prev) => prev.map((r, j) => j === i ? { ...r, date: e.target.value } : r))}
+                      className="rounded border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs text-muted-foreground">項目名</label>
+                    <input type="text" value={entry.itemName}
+                      onChange={(e) => setSupportEntries((prev) => prev.map((r, j) => j === i ? { ...r, itemName: e.target.value } : r))}
+                      className="rounded border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs text-muted-foreground">時間</label>
+                    <input type="number" min={0} step={0.5} value={entry.hours}
+                      onChange={(e) => setSupportEntries((prev) => prev.map((r, j) => j === i ? { ...r, hours: e.target.value } : r))}
+                      className="rounded border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs text-muted-foreground">単価</label>
+                    <input type="number" min={0} value={entry.unitPrice}
+                      onChange={(e) => setSupportEntries((prev) => prev.map((r, j) => j === i ? { ...r, unitPrice: e.target.value } : r))}
+                      className="rounded border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs text-muted-foreground">合計</label>
+                    <div className="rounded border border-border bg-muted px-2 py-1.5 text-xs text-foreground tabular-nums">
+                      {fmt((parseFloat(entry.hours) || 0) * (parseFloat(entry.unitPrice) || 0))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <div className="flex items-center gap-2">
+                <button onClick={() => setSupportEntries((prev) => [...prev, emptySupportEntry()])}
+                  className="rounded border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition">
+                  + 行を追加
+                </button>
+                <button onClick={handleSaveSupport} disabled={supportSaving}
+                  className="rounded bg-primary px-4 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50">
+                  {supportSaving ? "保存中..." : "スプレッドシートに保存"}
+                </button>
+                {supportMsg && <span className="text-xs text-muted-foreground">{supportMsg}</span>}
+              </div>
+            </div>
+          </InvoiceSection>
+
           {/* システム利用料 */}
           <InvoiceSection title="システム利用料" color="bg-slate-500" total={systemFee} isEmpty={false}>
             <div className="p-4 flex justify-between items-center">
@@ -618,7 +761,7 @@ export function InvoiceDashboard({
           <div className="rounded-lg border-2 border-foreground bg-card p-6 flex justify-between items-center">
             <div>
               <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">請求合計（税抜）</p>
-              <p className="text-xs text-muted-foreground mt-1">液剤代 + メンテナンス + 消耗品 + ロイヤリティ + システム利用料</p>
+              <p className="text-xs text-muted-foreground mt-1">液剤代 + メンテナンス + 消耗品 + ロイヤリティ + 現場応援 + システム利用料</p>
             </div>
             <p className="text-4xl font-bold text-foreground tabular-nums">{fmt(grandTotal)}</p>
           </div>
