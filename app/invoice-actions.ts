@@ -157,8 +157,9 @@ export async function appendHirockRows(
 
 // --------------------------------------------------------
 // HIROCKシート読み込み（消耗品）
-// A=日付, B=店舗名, C=品目, D=サイズ, E=色, F=数量, G=単価
-// 合計計算: 数量が100以上の場合は単価をそのまま使用、未満は数量×単価
+// A=日付, B=店舗名, C=品目, D=サイズ, E=色, F=数量, G=単価(合計金額)
+// 数量100以上: G列は合計金額 → 単価=合計÷数量、合計=G列の値そのまま
+// 数量100未満: G列は単価 → 合計=数量×単価
 // --------------------------------------------------------
 export async function fetchHirockRows(
   storeName: string,
@@ -200,16 +201,18 @@ export async function fetchHirockRows(
     })
     .map((row) => {
       const qty = parseNum(row[5]);   // F列: 数量
-      const unit = parseNum(row[6]);  // G列: 単価
-      // 数量100以上は単価をそのまま合計とする（枚数課金ではなく定額）
-      const tot = qty >= 100 ? unit : qty * unit;
+      const rawG = parseNum(row[6]);  // G列: 数量100以上は合計金額、未満は単価
+      // 数量100以上: G列=合計金額 → 単価=合計÷数量（小数点以下切り捨て）、合計=G列
+      // 数量100未満: G列=単価 → 合計=数量×単価
+      const unitPrice = qty >= 100 ? Math.floor(rawG / qty) : rawG;
+      const total = qty >= 100 ? rawG : qty * rawG;
       return {
         date: (row[0] as string) ?? "",
         storeName: (row[1] as string) ?? "",
         itemName: (row[2] as string) ?? "",
         quantity: qty,
-        unitPrice: unit,
-        total: tot,
+        unitPrice,
+        total,
       };
     });
 }
