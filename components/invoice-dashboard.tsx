@@ -48,6 +48,9 @@ export function InvoiceDashboard({
   // 行ごとの金額入力 key=インデックス value=金額
   const [maintenancePrices, setMaintenancePrices] = useState<Record<number, number>>({});
   const [hirockRefreshKey, setHirockRefreshKey] = useState(0);
+  // 部品処分費用（メンテナンスデータがある場合にデフォルトON）
+  const DISPOSAL_FEE = 5000;
+  const [includeDisposalFee, setIncludeDisposalFee] = useState(true);
 
   // 現場応援入力フォーム（複数行対応）
   type SupportEntry = { date: string; itemName: string; hours: string; unitPrice: string };
@@ -82,6 +85,7 @@ export function InvoiceDashboard({
   // 店名・期間が変わったら自動で再取得し、金額入力もリセット
   useEffect(() => {
     setMaintenancePrices({});
+    setIncludeDisposalFee(true);
     if (selectedStore && selectedPeriod) {
       loadInvoice(selectedStore, selectedPeriod);
     } else {
@@ -94,12 +98,15 @@ export function InvoiceDashboard({
   const supportTotal = invoiceData?.support.reduce((s, r) => s + r.total, 0) ?? 0;
   // 行ごとの金額の合計
   const maintenanceAmount = Object.values(maintenancePrices).reduce((s, v) => s + v, 0);
+  // メンテナンスデータがある場合の部品処分費用
+  const hasMaintenance = (invoiceData?.maintenance.length ?? 0) > 0;
+  const disposalFeeAmount = hasMaintenance && includeDisposalFee ? DISPOSAL_FEE : 0;
   // メンテナンスデータがあるのに金額未入力（0）の行が1件でもある場合はCSV不可
-  const hasMaintenanceUnfilled = (invoiceData?.maintenance.length ?? 0) > 0 &&
+  const hasMaintenanceUnfilled = hasMaintenance &&
     invoiceData!.maintenance.some((_, i) => (maintenancePrices[i] ?? 0) === 0);
   // システム利用料：高崎棟高店のみ¥17,500、他は¥35,000
   const systemFee = selectedStore.includes("高崎棟高") ? 17500 : 35000;
-  const grandTotal = apikaTotal + maintenanceAmount + hirockTotal + royaltyAmountExTax + systemFee + supportTotal;
+  const grandTotal = apikaTotal + maintenanceAmount + disposalFeeAmount + hirockTotal + royaltyAmountExTax + systemFee + supportTotal;
 
   async function handleSaveSupport() {
     if (!selectedStore || !selectedPeriod) return;
@@ -161,6 +168,10 @@ export function InvoiceDashboard({
           details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity || 1, unitPrice: price, amount: price });
         }
       });
+      // 部品処分費用（チェックONの場合のみ追加）
+      if (includeDisposalFee) {
+        details.push({ date: billingDate, name: "部品処分費用", qty: 1, unitPrice: DISPOSAL_FEE, amount: DISPOSAL_FEE });
+      }
     }
 
     // 消耗品セクション
@@ -237,23 +248,23 @@ export function InvoiceDashboard({
 
     // 2行目: 取引先情報行
     const infoRow = new Array(38).fill("");
-    infoRow[0]  = rowCount > 0 ? "40101" : "";  // A: csv_type (明細がある場合)
-    infoRow[1]  = "請求書";                       // B: 行形式
-    infoRow[2]  = p?.name ?? "";                  // C: 取引先名称
+    infoRow[0] = rowCount > 0 ? "40101" : "";  // A: csv_type (明細がある場合)
+    infoRow[1] = "請求書";                       // B: 行形式
+    infoRow[2] = p?.name ?? "";                  // C: 取引先名称
     // 件名: "2026年5月度" → "5月度請求について"
     const periodLabel = selectedPeriod.replace(/^\d{4}年/, "");
-    infoRow[3]  = `${periodLabel}請求について`;      // D: 件名
-    infoRow[4]  = billingDate;                    // E: 請求日（先月末）
-    infoRow[5]  = dueDate;                        // F: お支払期限（今月末）
+    infoRow[3] = `${periodLabel}請求について`;      // D: 件名
+    infoRow[4] = billingDate;                    // E: 請求日（先月末）
+    infoRow[5] = dueDate;                        // F: お支払期限（今月末）
     infoRow[10] = String(subtotal);               // K: 小計
     infoRow[11] = String(tax);                    // L: 消費税
     infoRow[12] = String(total);                  // M: 合計金額
     infoRow[13] = "御中";                          // N: 取引先敬称
-    infoRow[14] = p?.zip   ?? "";                 // O: 郵便番号
-    infoRow[15] = p?.pref  ?? "";                 // P: 都道府県
+    infoRow[14] = p?.zip ?? "";                 // O: 郵便番号
+    infoRow[15] = p?.pref ?? "";                 // P: ��道府県
     infoRow[16] = p?.addr1 ?? "";                 // Q: 住所1
     infoRow[17] = p?.addr2 ?? "";                 // R: 住所2
-    infoRow[18] = p?.dept  ?? "";                 // S: 部署
+    infoRow[18] = p?.dept ?? "";                 // S: 部署
     infoRow[19] = p?.title ?? "";                 // T: 担当者役職
     infoRow[20] = p?.contact ?? "";               // U: 担当者氏名
     infoRow[21] = "岡村昌輝";                      // V: 自社担当者氏名
@@ -263,8 +274,8 @@ export function InvoiceDashboard({
     // 3行目以降: 明細行（カテゴリー見出し行は品名のみ、明細行は各値を設定）
     const detailRows = details.map((det) => {
       const row = new Array(38).fill("");
-      row[0]  = "40101";  // A: csv_type
-      row[1]  = "品目";    // B: 行形式
+      row[0] = "40101";  // A: csv_type
+      row[1] = "品目";    // B: 行形式
       row[29] = det.name; // AD: 品名（見出し行も含む）
       row[37] = "10%";    // AL: 品目消費税率（3行目以降全行に設定）
       if (!det.isHeader) {
@@ -606,11 +617,38 @@ export function InvoiceDashboard({
                     );
                   })}
                 </tbody>
+                {/* 部品処分費用行（メンテナンスデータがある場合に表示） */}
+                <tbody>
+                  <tr className={`border-b border-border ${includeDisposalFee ? "bg-card" : "bg-muted/30"}`}>
+                    <td className="px-4 py-2.5 text-foreground tabular-nums text-xs">{/* 日付なし */}</td>
+                    <td className="px-4 py-2.5 text-foreground text-xs font-medium">部品処分費用</td>
+                    <td className="px-4 py-2.5 text-right text-foreground tabular-nums text-xs">1</td>
+                    <td className="px-4 py-2.5 text-muted-foreground text-xs"></td>
+                    <td className="px-4 py-2 text-right">
+                      <div className="flex items-center justify-end gap-3">
+                        <span className={`text-xs tabular-nums font-semibold ${includeDisposalFee ? "text-foreground" : "text-muted-foreground line-through"}`}>
+                          {fmt(DISPOSAL_FEE)}
+                        </span>
+                        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={includeDisposalFee}
+                            onChange={(e) => setIncludeDisposalFee(e.target.checked)}
+                            className="w-3.5 h-3.5 rounded accent-primary cursor-pointer"
+                          />
+                          <span className="text-xs text-muted-foreground whitespace-nowrap">
+                            {includeDisposalFee ? "含む" : "除外"}
+                          </span>
+                        </label>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
                 <tfoot>
                   <tr className="border-t-2 border-border bg-muted/40">
                     <td colSpan={4} className="px-4 py-2.5 text-xs font-semibold text-foreground">合計</td>
                     <td className="px-4 py-2.5 text-right text-sm font-bold text-foreground tabular-nums">
-                      {fmt(maintenanceAmount)}
+                      {fmt(maintenanceAmount + disposalFeeAmount)}
                     </td>
                   </tr>
                 </tfoot>
