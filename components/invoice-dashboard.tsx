@@ -60,7 +60,12 @@ export function InvoiceDashboard({
   const [supportMsg, setSupportMsg] = useState("");
 
   const fmt = (v: number) => `¥${v.toLocaleString("ja-JP")}`;
-  const fmtNum = (v: number) => v > 0 ? `¥${v.toLocaleString("ja-JP")}` : "—";
+  // 小数を含む数値も表示できるフォーマット（整数なら小数点なし）
+  const fmtNum = (v: number) => {
+    if (!v || v === 0) return "—";
+    const isDecimal = !Number.isInteger(v);
+    return `¥${v.toLocaleString("ja-JP", { minimumFractionDigits: isDecimal ? 2 : 0, maximumFractionDigits: 2 })}`;
+  };
 
   const loadInvoice = useCallback((store: string, period: string) => {
     if (!store || !period) return;
@@ -106,7 +111,9 @@ export function InvoiceDashboard({
     invoiceData!.maintenance.some((_, i) => (maintenancePrices[i] ?? 0) === 0);
   // システム利用料：高崎棟高店のみ¥17,500、他は¥35,000
   const systemFee = selectedStore.includes("高崎棟高") ? 17500 : 35000;
-  const grandTotal = apikaTotal + maintenanceAmount + disposalFeeAmount + hirockTotal + royaltyAmountExTax + systemFee + supportTotal;
+  // ダイヤルパッド通信費：鹿児島中山店のみ¥3,000
+  const dialpadFee = selectedStore.includes("鹿児島中山") ? 3000 : 0;
+  const grandTotal = apikaTotal + maintenanceAmount + disposalFeeAmount + hirockTotal + royaltyAmountExTax + systemFee + dialpadFee + supportTotal;
 
   async function handleSaveSupport() {
     if (!selectedStore || !selectedPeriod) return;
@@ -195,6 +202,9 @@ export function InvoiceDashboard({
     // システム利用料セクション
     details.push({ date: "", name: "【システム利用料】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
     details.push({ date: billingDate, name: "システム利用料", qty: 1, unitPrice: systemFee, amount: systemFee });
+    if (dialpadFee > 0) {
+      details.push({ date: billingDate, name: "ダイヤルパッド通信費", qty: 1, unitPrice: dialpadFee, amount: dialpadFee });
+    }
 
     const rowCount = details.length;
     const subtotal = grandTotal;
@@ -327,12 +337,16 @@ export function InvoiceDashboard({
         <td style="text-align:right">${fmt(r.total)}</td>
       </tr>`).join("");
 
+    const fmtUnitPrice = (v: number) => {
+      const isDecimal = !Number.isInteger(v);
+      return `¥${v.toLocaleString("ja-JP", { minimumFractionDigits: isDecimal ? 2 : 0, maximumFractionDigits: 2 })}`;
+    };
     const hirockRows = d.hirock.map((r) => `
       <tr>
         <td>${r.date}</td>
         <td>${r.itemName}</td>
         <td style="text-align:right">${r.quantity}</td>
-        <td style="text-align:right">${fmt(r.unitPrice)}</td>
+        <td style="text-align:right">${fmtUnitPrice(r.unitPrice)}</td>
         <td style="text-align:right">${fmt(r.total)}</td>
       </tr>`).join("");
 
@@ -788,18 +802,24 @@ export function InvoiceDashboard({
           </InvoiceSection>
 
           {/* システム利用料 */}
-          <InvoiceSection title="システム利用料" color="bg-slate-500" total={systemFee} isEmpty={false}>
-            <div className="p-4 flex justify-between items-center">
+          <InvoiceSection title="システム利用料" color="bg-slate-500" total={systemFee + dialpadFee} isEmpty={false}>
+            <div className="p-4 flex justify-between items-center border-b border-border">
               <span className="text-sm text-foreground">システム利用料（月額）</span>
               <span className="font-bold text-foreground tabular-nums">{fmt(systemFee)}</span>
             </div>
+            {dialpadFee > 0 && (
+              <div className="p-4 flex justify-between items-center">
+                <span className="text-sm text-foreground">ダイヤルパッド通信費</span>
+                <span className="font-bold text-foreground tabular-nums">{fmt(dialpadFee)}</span>
+              </div>
+            )}
           </InvoiceSection>
 
           {/* 合計 */}
           <div className="rounded-lg border-2 border-foreground bg-card p-6 flex justify-between items-center">
             <div>
               <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">請求合計（税抜）</p>
-              <p className="text-xs text-muted-foreground mt-1">液剤代 + メンテナンス + 消耗品 + ロイヤリティ + 現場応援 + システム利用料</p>
+              <p className="text-xs text-muted-foreground mt-1">液剤代 + メンテナンス + 消耗品 + ロイヤリティ + 現場応援 + システム利用料{dialpadFee > 0 ? " + ダイヤルパッド通信費" : ""}</p>
             </div>
             <p className="text-4xl font-bold text-foreground tabular-nums">{fmt(grandTotal)}</p>
           </div>

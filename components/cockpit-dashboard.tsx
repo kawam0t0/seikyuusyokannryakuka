@@ -7,11 +7,11 @@ import { CsvUploader } from "@/components/csv-uploader";
 import { DetailsTable } from "@/components/details-table";
 import { PdfExport } from "@/components/pdf-export";
 
-// 2026年5月度 〜 2030年5月度 の全月を生成
+// 2026年4月度 〜 2030年5月度 の全月を生成
 function generatePeriods(): string[] {
   const periods: string[] = [];
   for (let year = 2026; year <= 2030; year++) {
-    const startMonth = year === 2026 ? 5 : 1;
+    const startMonth = year === 2026 ? 4 : 1;
     const endMonth = year === 2030 ? 5 : 12;
     for (let month = startMonth; month <= endMonth; month++) {
       periods.push(`${year}年${month}月度`);

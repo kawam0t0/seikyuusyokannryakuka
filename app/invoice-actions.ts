@@ -202,9 +202,9 @@ export async function fetchHirockRows(
     .map((row) => {
       const qty = parseNum(row[5]);   // F列: 数量
       const rawG = parseNum(row[6]);  // G列: 数量100以上は合計金額、未満は単価
-      // 数量100以上: G列=合計金額 → 単価=合計÷数量（小数点以下切り捨て）、合計=G列
+      // 数量100以上: G列=合計金額 → 単価=合計÷数量（小数点2桁）、合計=G列
       // 数量100未満: G列=単価 → 合計=数量×単価
-      const unitPrice = qty >= 100 ? Math.floor(rawG / qty) : rawG;
+      const unitPrice = qty >= 100 ? Math.round((rawG / qty) * 100) / 100 : rawG;
       const total = qty >= 100 ? rawG : qty * rawG;
       return {
         date: (row[0] as string) ?? "",
