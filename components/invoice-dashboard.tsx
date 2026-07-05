@@ -52,6 +52,20 @@ export function InvoiceDashboard({
   const DISPOSAL_FEE = 5000;
   const [includeDisposalFee, setIncludeDisposalFee] = useState(true);
 
+  // 消耗品（HIROCK）手動追加行
+  type HirockManualRow = { date: string; itemName: string; quantity: string; unitPrice: string };
+  const emptyHirockRow = (): HirockManualRow => ({ date: "", itemName: "", quantity: "1", unitPrice: "" });
+  const [hirockManualRows, setHirockManualRows] = useState<HirockManualRow[]>([]);
+
+  // メンテナンス手動追加行
+  type MaintenanceManualRow = { date: string; itemName: string; quantity: string; price: string; note: string };
+  const emptyMaintenanceRow = (): MaintenanceManualRow => ({ date: "", itemName: "", quantity: "1", price: "", note: "" });
+  const [maintenanceManualRows, setMaintenanceManualRows] = useState<MaintenanceManualRow[]>([]);
+
+  // 高崎棟高店：マイクロファイバー分割料金
+  const MICROFIBER_FEE = 10000;
+  const isTakasaki = selectedStore.includes("高崎棟高");
+
   // 現場応援入力フォーム（複数行対応）
   type SupportEntry = { date: string; itemName: string; hours: string; unitPrice: string };
   const emptySupportEntry = (): SupportEntry => ({ date: "", itemName: "現場応援", hours: "", unitPrice: "1500" });
@@ -91,6 +105,8 @@ export function InvoiceDashboard({
   useEffect(() => {
     setMaintenancePrices({});
     setIncludeDisposalFee(true);
+    setHirockManualRows([]);
+    setMaintenanceManualRows([]);
     if (selectedStore && selectedPeriod) {
       loadInvoice(selectedStore, selectedPeriod);
     } else {
@@ -101,19 +117,28 @@ export function InvoiceDashboard({
   const apikaTotal = invoiceData?.apika.reduce((s, r) => s + r.total, 0) ?? 0;
   const hirockTotal = invoiceData?.hirock.reduce((s, r) => s + r.total, 0) ?? 0;
   const supportTotal = invoiceData?.support.reduce((s, r) => s + r.total, 0) ?? 0;
-  // 行ごとの金額の合計
-  const maintenanceAmount = Object.values(maintenancePrices).reduce((s, v) => s + v, 0);
+  // 消耗品手動追加分の合計
+  const hirockManualTotal = hirockManualRows.reduce((s, r) => {
+    const qty = parseFloat(r.quantity) || 0;
+    const unit = parseFloat(r.unitPrice) || 0;
+    return s + qty * unit;
+  }, 0);
+  // 行ごとの金額の合計（スプレッドシート行 + 手動追加行）
+  const maintenanceAmount = Object.values(maintenancePrices).reduce((s, v) => s + v, 0)
+    + maintenanceManualRows.reduce((s, r) => s + (parseFloat(r.price) || 0), 0);
   // メンテナンスデータがある場合の部品処分費用
-  const hasMaintenance = (invoiceData?.maintenance.length ?? 0) > 0;
+  const hasMaintenance = (invoiceData?.maintenance.length ?? 0) > 0 || maintenanceManualRows.length > 0;
   const disposalFeeAmount = hasMaintenance && includeDisposalFee ? DISPOSAL_FEE : 0;
   // メンテナンスデータがあるのに金額未入力（0）の行が1件でもある場合はCSV不可
-  const hasMaintenanceUnfilled = hasMaintenance &&
-    invoiceData!.maintenance.some((_, i) => (maintenancePrices[i] ?? 0) === 0);
+  const hasMaintenanceUnfilled = (invoiceData?.maintenance ?? []).some((_, i) => (maintenancePrices[i] ?? 0) === 0)
+    || maintenanceManualRows.some((r) => !r.price || parseFloat(r.price) === 0);
   // システム利用料：高崎棟高店のみ¥17,500、他は¥35,000
   const systemFee = selectedStore.includes("高崎棟高") ? 17500 : 35000;
   // ダイヤルパッド通信費：鹿児島中山店のみ¥3,000
   const dialpadFee = selectedStore.includes("鹿児島中山") ? 3000 : 0;
-  const grandTotal = apikaTotal + maintenanceAmount + disposalFeeAmount + hirockTotal + royaltyAmountExTax + systemFee + dialpadFee + supportTotal;
+  // マイクロファイバー分割料金：高崎棟高店のみ
+  const microfiberFee = isTakasaki ? MICROFIBER_FEE : 0;
+  const grandTotal = apikaTotal + (hirockTotal + hirockManualTotal) + maintenanceAmount + disposalFeeAmount + supportTotal + systemFee + dialpadFee + microfiberFee + royaltyAmountExTax;
 
   async function handleSaveSupport() {
     if (!selectedStore || !selectedPeriod) return;
@@ -151,28 +176,51 @@ export function InvoiceDashboard({
     const billingDate = fmtDate(lastMonthEnd);
     // 日付文字列をYYYY/MM/DD形式に統一（ハイフン区切りをスラッシュに変換）
     const normalizeDate = (s: string) => s.replace(/-/g, "/");
-    // 今月末日
-    const thisMonthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-    const dueDate = fmtDate(thisMonthEnd);
+    // 支払期限：新前橋店は請求日（先月末）の翌々月15日、他は今月末日
+    // 例）請求日2026/06/30 → 2026/08/15
+    const isShimmae = selectedStore.includes("新前橋");
+    const dueDate = isShimmae
+      ? fmtDate(new Date(lastMonthEnd.getFullYear(), lastMonthEnd.getMonth() + 2, 15))
+      : fmtDate(new Date(today.getFullYear(), today.getMonth() + 1, 0));
 
     // ---- 全明細行を収集（カテゴリー見出し行 + 明細行） ----
     type DetailRow = { date: string; name: string; qty: number; unitPrice: number; amount: number; isHeader?: boolean; detail?: string };
     const details: DetailRow[] = [];
 
-    // 液剤代セクション
+    // 1. 液剤代セクション
     if (d.apika.length > 0) {
       details.push({ date: "", name: "【液剤代】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
       d.apika.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity, unitPrice: r.unitPrice, amount: r.total }));
     }
 
-    // メンテナンスセクション
-    const maintenanceItems = d.maintenance.filter((r, i) => (maintenancePrices[i] ?? 0) > 0 || r.itemName);
-    if (maintenanceItems.length > 0) {
+    // 2. 消耗品セクション（スプレッドシート + 手動追加）
+    if (d.hirock.length > 0 || hirockManualRows.length > 0) {
+      details.push({ date: "", name: "【消耗品】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
+      d.hirock.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity, unitPrice: r.unitPrice, amount: r.total }));
+      hirockManualRows.forEach((r) => {
+        const qty = parseFloat(r.quantity) || 0;
+        const unit = parseFloat(r.unitPrice) || 0;
+        if (r.itemName && unit > 0) {
+          details.push({ date: normalizeDate(r.date), name: r.itemName, qty, unitPrice: unit, amount: qty * unit });
+        }
+      });
+    }
+
+    // 3. メンテナンスセクション（スプレッドシート + 手動追加）
+    const hasAnyMaintenance = d.maintenance.length > 0 || maintenanceManualRows.length > 0;
+    if (hasAnyMaintenance) {
       details.push({ date: "", name: "【メンテナンス】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
       d.maintenance.forEach((r, i) => {
         const price = maintenancePrices[i] ?? 0;
         if (price > 0 || r.itemName) {
-          details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity || 1, unitPrice: price, amount: price });
+          // 備考があれば詳細カラムに格納（5点目）
+          details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity || 1, unitPrice: price, amount: price, detail: r.note ?? "" });
+        }
+      });
+      maintenanceManualRows.forEach((r) => {
+        const price = parseFloat(r.price) || 0;
+        if (r.itemName && price > 0) {
+          details.push({ date: normalizeDate(r.date), name: r.itemName, qty: parseFloat(r.quantity) || 1, unitPrice: price, amount: price, detail: r.note ?? "" });
         }
       });
       // 部品処分費用（チェックONの場合のみ追加）
@@ -181,29 +229,29 @@ export function InvoiceDashboard({
       }
     }
 
-    // 消耗品セクション
-    if (d.hirock.length > 0) {
-      details.push({ date: "", name: "【消耗品】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
-      d.hirock.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity, unitPrice: r.unitPrice, amount: r.total }));
-    }
-
-    // ロイヤリティセクション
-    if (royaltyAmountExTax > 0) {
-      details.push({ date: "", name: "【ロイヤリティ】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
-      details.push({ date: billingDate, name: "ロイヤリティ", qty: 1, unitPrice: royaltyAmountExTax, amount: royaltyAmountExTax, detail: "詳細は別紙参照ください" });
-    }
-
-    // 現場応援セクション
+    // 4. 現場応援セクション
     if (d.support.length > 0) {
       details.push({ date: "", name: "【現場応援】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
       d.support.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.hours, unitPrice: r.unitPrice, amount: r.total }));
     }
 
-    // システム利用料セクション
+    // 5. システム利用料セクション
     details.push({ date: "", name: "【システム利用料】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
     details.push({ date: billingDate, name: "システム利用料", qty: 1, unitPrice: systemFee, amount: systemFee });
     if (dialpadFee > 0) {
       details.push({ date: billingDate, name: "ダイヤルパッド通信費", qty: 1, unitPrice: dialpadFee, amount: dialpadFee });
+    }
+
+    // 5.5 その他セクション（マイクロファイバー分割料金など）
+    if (microfiberFee > 0) {
+      details.push({ date: "", name: "【その他】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
+      details.push({ date: billingDate, name: "マイクロファイバー分割料金", qty: 1, unitPrice: microfiberFee, amount: microfiberFee });
+    }
+
+    // 6. ロイヤリティセクション
+    if (royaltyAmountExTax > 0) {
+      details.push({ date: "", name: "【ロイヤリティ】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
+      details.push({ date: billingDate, name: "ロイヤリティ", qty: 1, unitPrice: royaltyAmountExTax, amount: royaltyAmountExTax, detail: "詳細は別紙参照ください" });
     }
 
     const rowCount = details.length;
@@ -540,7 +588,7 @@ export function InvoiceDashboard({
 
       {!isPending && (
         <div className="space-y-6">
-          {/* 液剤代 */}
+          {/* 1. 液剤代 */}
           <InvoiceSection title="液剤代（APIKA）" color="bg-green-500" total={apikaTotal} isEmpty={!invoiceData || invoiceData.apika.length === 0}>
             {invoiceData && invoiceData.apika.length > 0 && (
               <table className="w-full text-xs">
@@ -568,12 +616,78 @@ export function InvoiceDashboard({
             )}
           </InvoiceSection>
 
-          {/* メンテナンス */}
+          {/* 2. 消耗品 HIROCK */}
+          <InvoiceSection title="消耗品（HIROCK）" color="bg-orange-500" total={hirockTotal + hirockManualTotal} isEmpty={!invoiceData || (invoiceData.hirock.length === 0 && hirockManualRows.length === 0)}>
+            {invoiceData && (
+              <>
+                {invoiceData.hirock.length > 0 && (
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-border bg-muted">
+                        <th className="px-4 py-2.5 text-left text-muted-foreground font-semibold">日付</th>
+                        <th className="px-4 py-2.5 text-left text-muted-foreground font-semibold">品目</th>
+                        <th className="px-4 py-2.5 text-right text-muted-foreground font-semibold">数量</th>
+                        <th className="px-4 py-2.5 text-right text-muted-foreground font-semibold">単価</th>
+                        <th className="px-4 py-2.5 text-right text-muted-foreground font-semibold">合計</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invoiceData.hirock.map((r, i) => (
+                        <tr key={i} className={`border-b border-border ${i % 2 === 0 ? "bg-card" : "bg-muted/20"}`}>
+                          <td className="px-4 py-2.5 text-foreground tabular-nums">{r.date}</td>
+                          <td className="px-4 py-2.5 text-foreground">{r.itemName}</td>
+                          <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{r.quantity}</td>
+                          <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{fmtNum(r.unitPrice)}</td>
+                          <td className="px-4 py-2.5 text-right font-semibold text-foreground tabular-nums">{fmtNum(r.total)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {/* 手動追加行 */}
+                {hirockManualRows.length > 0 && (
+                  <table className="w-full text-xs border-t border-border">
+                    <thead>
+                      <tr className="border-b border-border bg-muted/60">
+                        <th className="px-3 py-2 text-left text-muted-foreground font-semibold">日付</th>
+                        <th className="px-3 py-2 text-left text-muted-foreground font-semibold">品目</th>
+                        <th className="px-3 py-2 text-right text-muted-foreground font-semibold">数量</th>
+                        <th className="px-3 py-2 text-right text-muted-foreground font-semibold">単価</th>
+                        <th className="px-3 py-2 text-right text-muted-foreground font-semibold">合計</th>
+                        <th className="px-3 py-2 text-center text-muted-foreground font-semibold">削除</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hirockManualRows.map((r, i) => {
+                        const qty = parseFloat(r.quantity) || 0;
+                        const unit = parseFloat(r.unitPrice) || 0;
+                        return (
+                          <tr key={i} className="border-b border-border bg-primary/5">
+                            <td className="px-3 py-1.5"><input type="text" value={r.date} onChange={(e) => setHirockManualRows((p) => p.map((x, j) => j === i ? { ...x, date: e.target.value } : x))} className="w-28 rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" placeholder="YYYY/MM/DD" /></td>
+                            <td className="px-3 py-1.5"><input type="text" value={r.itemName} onChange={(e) => setHirockManualRows((p) => p.map((x, j) => j === i ? { ...x, itemName: e.target.value } : x))} className="w-full rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" placeholder="品目名" /></td>
+                            <td className="px-3 py-1.5"><input type="number" min={0} value={r.quantity} onChange={(e) => setHirockManualRows((p) => p.map((x, j) => j === i ? { ...x, quantity: e.target.value } : x))} className="w-20 rounded border border-border bg-card px-2 py-1 text-right text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" /></td>
+                            <td className="px-3 py-1.5"><input type="number" min={0} value={r.unitPrice} onChange={(e) => setHirockManualRows((p) => p.map((x, j) => j === i ? { ...x, unitPrice: e.target.value } : x))} className="w-24 rounded border border-border bg-card px-2 py-1 text-right text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" placeholder="単価" /></td>
+                            <td className="px-3 py-1.5 text-right tabular-nums text-foreground">{fmt(qty * unit)}</td>
+                            <td className="px-3 py-1.5 text-center"><button onClick={() => setHirockManualRows((p) => p.filter((_, j) => j !== i))} className="text-red-500 text-xs border border-red-200 rounded px-2 py-0.5 hover:bg-red-50">削除</button></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+                <div className="px-4 py-2 border-t border-border">
+                  <button onClick={() => setHirockManualRows((p) => [...p, emptyHirockRow()])} className="rounded border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition">+ 手動で行を追加</button>
+                </div>
+              </>
+            )}
+          </InvoiceSection>
+
+          {/* 3. メンテナンス */}
           <InvoiceSection
             title="メンテナンス"
             color="bg-blue-500"
-            total={maintenanceAmount}
-            isEmpty={!invoiceData || invoiceData.maintenance.length === 0}
+            total={maintenanceAmount + disposalFeeAmount}
+            isEmpty={!invoiceData || (invoiceData.maintenance.length === 0 && maintenanceManualRows.length === 0)}
             titleExtra={
               <a
                 href="https://docs.google.com/spreadsheets/d/1eynNDQX-qPSKog67kU9RXKUpomc906QqwAAGzx4Sm-k/edit?usp=sharing"
@@ -585,7 +699,7 @@ export function InvoiceDashboard({
               </a>
             }
           >
-            {invoiceData && invoiceData.maintenance.length > 0 && (
+            {invoiceData && (
               <table className="w-full text-xs">
                 <thead>
                   <tr className="border-b border-border bg-muted">
@@ -630,11 +744,33 @@ export function InvoiceDashboard({
                       </tr>
                     );
                   })}
+                  {/* 手動追加行 */}
+                  {maintenanceManualRows.map((r, i) => {
+                    const priceVal = parseFloat(r.price) || 0;
+                    const isEmpty = priceVal === 0;
+                    return (
+                      <tr key={`manual-${i}`} className={`border-b border-border ${isEmpty ? "bg-red-50" : "bg-primary/5"}`}>
+                        <td className="px-2 py-1.5"><input type="text" value={r.date} onChange={(e) => setMaintenanceManualRows((p) => p.map((x, j) => j === i ? { ...x, date: e.target.value } : x))} className="w-28 rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" placeholder="YYYY/MM/DD" /></td>
+                        <td className="px-2 py-1.5"><input type="text" value={r.itemName} onChange={(e) => setMaintenanceManualRows((p) => p.map((x, j) => j === i ? { ...x, itemName: e.target.value } : x))} className="w-full rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" placeholder="品名" /></td>
+                        <td className="px-2 py-1.5"><input type="number" min={0} value={r.quantity} onChange={(e) => setMaintenanceManualRows((p) => p.map((x, j) => j === i ? { ...x, quantity: e.target.value } : x))} className="w-20 rounded border border-border bg-card px-2 py-1 text-right text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" /></td>
+                        <td className="px-2 py-1.5 flex gap-1">
+                          <input type="text" value={r.note} onChange={(e) => setMaintenanceManualRows((p) => p.map((x, j) => j === i ? { ...x, note: e.target.value } : x))} className="w-full rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" placeholder="備考" />
+                          <button onClick={() => setMaintenanceManualRows((p) => p.filter((_, j) => j !== i))} className="text-red-500 text-xs border border-red-200 rounded px-2 py-0.5 hover:bg-red-50 whitespace-nowrap">削除</button>
+                        </td>
+                        <td className="px-2 py-1.5 text-right">
+                          <div className="flex flex-col items-end gap-1">
+                            <input type="number" min={0} value={r.price} onChange={(e) => setMaintenanceManualRows((p) => p.map((x, j) => j === i ? { ...x, price: e.target.value } : x))} className={`w-28 rounded border px-2 py-1 text-right text-xs text-foreground focus:outline-none focus:ring-1 tabular-nums ${isEmpty ? "border-red-400 bg-red-50 focus:ring-red-300" : "border-border bg-card focus:border-primary focus:ring-primary/20"}`} placeholder="金額を入力" />
+                            {isEmpty && <span className="text-xs text-red-500 font-medium">金額の入力が必要です</span>}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
-                {/* 部品処分費用行（メンテナンスデータがある場合に表示） */}
+                {/* 部品処分費用行 */}
                 <tbody>
                   <tr className={`border-b border-border ${includeDisposalFee ? "bg-card" : "bg-muted/30"}`}>
-                    <td className="px-4 py-2.5 text-foreground tabular-nums text-xs">{/* 日付なし */}</td>
+                    <td className="px-4 py-2.5 text-foreground tabular-nums text-xs"></td>
                     <td className="px-4 py-2.5 text-foreground text-xs font-medium">部品処分費用</td>
                     <td className="px-4 py-2.5 text-right text-foreground tabular-nums text-xs">1</td>
                     <td className="px-4 py-2.5 text-muted-foreground text-xs"></td>
@@ -666,63 +802,18 @@ export function InvoiceDashboard({
                     </td>
                   </tr>
                 </tfoot>
-              </table>
-            )}
-          </InvoiceSection>
-
-          {/* 消耗品 HIROCK */}
-          <InvoiceSection title="消耗品（HIROCK）" color="bg-orange-500" total={hirockTotal} isEmpty={!invoiceData || invoiceData.hirock.length === 0}>
-            {invoiceData && invoiceData.hirock.length > 0 && (
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-border bg-muted">
-                    <th className="px-4 py-2.5 text-left text-muted-foreground font-semibold">日付</th>
-                    <th className="px-4 py-2.5 text-left text-muted-foreground font-semibold">品目</th>
-                    <th className="px-4 py-2.5 text-right text-muted-foreground font-semibold">数量</th>
-                    <th className="px-4 py-2.5 text-right text-muted-foreground font-semibold">単価</th>
-                    <th className="px-4 py-2.5 text-right text-muted-foreground font-semibold">合計</th>
-                  </tr>
-                </thead>
                 <tbody>
-                  {invoiceData.hirock.map((r, i) => (
-                    <tr key={i} className={`border-b border-border ${i % 2 === 0 ? "bg-card" : "bg-muted/20"}`}>
-                      <td className="px-4 py-2.5 text-foreground tabular-nums">{r.date}</td>
-                      <td className="px-4 py-2.5 text-foreground">{r.itemName}</td>
-                      <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{r.quantity}</td>
-                      <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{fmtNum(r.unitPrice)}</td>
-                      <td className="px-4 py-2.5 text-right font-semibold text-foreground tabular-nums">{fmtNum(r.total)}</td>
-                    </tr>
-                  ))}
+                  <tr>
+                    <td colSpan={5} className="px-4 py-2">
+                      <button onClick={() => setMaintenanceManualRows((p) => [...p, emptyMaintenanceRow()])} className="rounded border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition">+ 手動で行を追加</button>
+                    </td>
+                  </tr>
                 </tbody>
               </table>
             )}
           </InvoiceSection>
 
-          {/* ロイヤリティ */}
-          <InvoiceSection title="ロイヤリティ（税抜）" color="bg-purple-500" total={royaltyAmountExTax} isEmpty={royaltyAmountExTax === 0}>
-            {royaltyAmountExTax > 0 && (
-              <div className="p-4 space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm font-medium text-foreground">ロイヤリティ金額（税抜）</span>
-                  <span className="font-bold text-primary text-base tabular-nums">{fmt(royaltyAmountExTax)}</span>
-                </div>
-                <div className="grid grid-cols-3 gap-3">
-                  {[
-                    { label: "現金売上（税抜）", val: cashExTax },
-                    { label: "キャッシュレス（税抜）", val: cashlessExTax },
-                    { label: "サブスク（税抜）", val: memberExTax },
-                  ].map(({ label, val }) => (
-                    <div key={label} className="rounded-lg bg-muted px-3 py-2 text-xs">
-                      <p className="text-muted-foreground">{label}</p>
-                      <p className="font-semibold text-foreground mt-1 tabular-nums">{fmt(val)}</p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </InvoiceSection>
-
-          {/* 現場応援 */}
+          {/* 4. 現場応援 */}
           <InvoiceSection title="現場応援" color="bg-orange-500" total={supportTotal} isEmpty={false}>
             {/* 保存済みデータ表示 */}
             {invoiceData && invoiceData.support.length > 0 && (
@@ -801,9 +892,9 @@ export function InvoiceDashboard({
             </div>
           </InvoiceSection>
 
-          {/* システム利用料 */}
+          {/* 5. システム利用料 */}
           <InvoiceSection title="システム利用料" color="bg-slate-500" total={systemFee + dialpadFee} isEmpty={false}>
-            <div className="p-4 flex justify-between items-center border-b border-border">
+            <div className={`p-4 flex justify-between items-center ${dialpadFee > 0 ? "border-b border-border" : ""}`}>
               <span className="text-sm text-foreground">システム利用料（月額）</span>
               <span className="font-bold text-foreground tabular-nums">{fmt(systemFee)}</span>
             </div>
@@ -815,11 +906,50 @@ export function InvoiceDashboard({
             )}
           </InvoiceSection>
 
+          {/* 5.5 その他（高崎棟高店のみ表示） */}
+          {microfiberFee > 0 && (
+            <InvoiceSection title="その他" color="bg-amber-500" total={microfiberFee} isEmpty={false}>
+              <div className="p-4 flex justify-between items-center">
+                <span className="text-sm text-foreground">マイクロファイバー分割料金</span>
+                <span className="font-bold text-foreground tabular-nums">{fmt(microfiberFee)}</span>
+              </div>
+            </InvoiceSection>
+          )}
+
+          {/* 6. ロイヤリティ */}
+          <InvoiceSection title="ロイヤリティ（税抜）" color="bg-purple-500" total={royaltyAmountExTax} isEmpty={royaltyAmountExTax === 0}>
+            {royaltyAmountExTax > 0 && (
+              <div className="p-4 space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-sm font-medium text-foreground">ロイヤリティ金額（税抜）</span>
+                  <span className="font-bold text-primary text-base tabular-nums">{fmt(royaltyAmountExTax)}</span>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  {[
+                    { label: "現金売上（税抜）", val: cashExTax },
+                    { label: "キャッシュレス（税抜）", val: cashlessExTax },
+                    { label: "サブスク（税抜）", val: memberExTax },
+                  ].map(({ label, val }) => (
+                    <div key={label} className="rounded-lg bg-muted px-3 py-2 text-xs">
+                      <p className="text-muted-foreground">{label}</p>
+                      <p className="font-semibold text-foreground mt-1 tabular-nums">{fmt(val)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </InvoiceSection>
+
           {/* 合計 */}
           <div className="rounded-lg border-2 border-foreground bg-card p-6 flex justify-between items-center">
             <div>
               <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">請求合計（税抜）</p>
-              <p className="text-xs text-muted-foreground mt-1">液剤代 + メンテナンス + 消耗品 + ロイヤリティ + 現場応援 + システム利用料{dialpadFee > 0 ? " + ダイヤルパッド通信費" : ""}</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                液剤代 + 消耗品 + メンテナンス + 現場応援 + システム利用料
+                {dialpadFee > 0 ? " + ダイヤルパッド通信費" : ""}
+                {microfiberFee > 0 ? " + その他" : ""}
+                {" + ロイヤリティ"}
+              </p>
             </div>
             <p className="text-4xl font-bold text-foreground tabular-nums">{fmt(grandTotal)}</p>
           </div>
