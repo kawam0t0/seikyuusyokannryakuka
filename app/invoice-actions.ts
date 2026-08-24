@@ -126,8 +126,37 @@ export async function fetchMaintenanceRows(
 }
 
 // --------------------------------------------------------
-// HIROCKシートへ行を追記
-// A=日付, B=店舗名, C=品目, D=数量, E=単価, F=合計
+// HIROCKシート 列マッピング（2026-08 カラム変更後）
+// A=発注番号, B=発注日, C=発注時刻, D=店舗名, E=ステータス, F=出荷日,
+// G=商品名, H=サイズ, I=カラー, J=ロット, K=数量, L=単価, M=金額,
+// N=カテゴリー, O=発注先, P=請求書送付済み, Q=備考, R=移行元
+// --------------------------------------------------------
+const HIROCK_COL = {
+  orderNo: 0,   // A
+  orderDate: 1, // B
+  orderTime: 2, // C
+  store: 3,     // D
+  status: 4,    // E
+  shipDate: 5,  // F
+  itemName: 6,  // G
+  size: 7,      // H
+  color: 8,     // I
+  lot: 9,       // J
+  quantity: 10, // K
+  unitPrice: 11,// L
+  amount: 12,   // M
+  category: 13, // N
+  supplier: 14, // O
+  invoiced: 15, // P
+  note: 16,     // Q
+  source: 17,   // R
+} as const;
+
+const HIROCK_SUPPLIER = "ハイロックデザインオフィス";
+
+// --------------------------------------------------------
+// HIROCKシートへ行を追記（PDF取込み・手動追加用）
+// 新カラム構成に合わせて18列で書き込む
 // --------------------------------------------------------
 export async function appendHirockRows(
   rows: HirockRow[]
@@ -135,18 +164,23 @@ export async function appendHirockRows(
   if (rows.length === 0) return { appended: 0 };
 
   const sheets = getSheetsClient();
-  const values = rows.map((r) => [
-    r.date,
-    r.storeName,
-    r.itemName,
-    r.quantity,
-    r.unitPrice,
-    r.total,
-  ]);
+  const values = rows.map((r) => {
+    const row = new Array(18).fill("");
+    row[HIROCK_COL.orderDate] = r.date;
+    row[HIROCK_COL.store] = r.storeName;
+    row[HIROCK_COL.status] = "出荷済み";
+    row[HIROCK_COL.itemName] = r.itemName;
+    row[HIROCK_COL.quantity] = r.quantity;
+    row[HIROCK_COL.unitPrice] = r.unitPrice;
+    row[HIROCK_COL.amount] = r.total || r.quantity * r.unitPrice;
+    row[HIROCK_COL.supplier] = HIROCK_SUPPLIER;
+    row[HIROCK_COL.source] = "PDF取込";
+    return row;
+  });
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: "HIROCK!A:F",
+    range: "HIROCK!A:R",
     valueInputOption: "USER_ENTERED",
     insertDataOption: "INSERT_ROWS",
     requestBody: { values },
@@ -157,9 +191,10 @@ export async function appendHirockRows(
 
 // --------------------------------------------------------
 // HIROCKシート読み込み（消耗品）
-// A=日付, B=店舗名, C=品目, D=サイズ, E=色, F=数量, G=単価(合計金額)
-// 数量100以上: G列は合計金額 → 単価=合計÷数量、合計=G列の値そのまま
-// 数量100未満: G列は単価 → 合計=数量×単価
+// ・対象月の判定は B列(発注日)
+// ・ステータス(E列)は絞り込まず全件対象
+// ・品目名は 商品名 + サイズ/カラー、ロットがあればロット数を付記
+// ・金額はM列をそのまま採用（空欄なら 数量×単価 で算出）
 // --------------------------------------------------------
 export async function fetchHirockRows(
   storeName: string,
@@ -173,9 +208,13 @@ export async function fetchHirockRows(
   const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: "HIROCK!A2:G",
+    range: "HIROCK!A2:R",
   });
   const rows = res.data.values ?? [];
+
+  function cell(row: unknown[], idx: number): string {
+    return String(row[idx] ?? "").trim();
+  }
 
   function parseNum(v: unknown): number {
     if (!v) return 0;
@@ -187,10 +226,25 @@ export async function fetchHirockRows(
     return new Date(dateStr.replace(/\//g, "-"));
   }
 
+  // 商品名にサイズ・カラー・ロットを付記
+  function buildItemName(row: unknown[]): string {
+    const base = cell(row, HIROCK_COL.itemName);
+    const variant = [cell(row, HIROCK_COL.size), cell(row, HIROCK_COL.color)]
+      .filter((v) => v !== "")
+      .join(" / ");
+    const lotRaw = cell(row, HIROCK_COL.lot);
+    // ロットがスプレッドシート側で日付に化けている場合は無視する
+    const lot = /^\d+$/.test(lotRaw) ? lotRaw : "";
+    const suffix = [variant, lot ? `ロット${lot}` : ""]
+      .filter((v) => v !== "")
+      .join(" / ");
+    return suffix ? `${base}（${suffix}）` : base;
+  }
+
   return rows
     .filter((row) => {
-      const dateStr = (row[0] as string | undefined) ?? "";
-      const store = (row[1] as string | undefined) ?? "";
+      const dateStr = cell(row, HIROCK_COL.orderDate);
+      const store = cell(row, HIROCK_COL.store);
       const d = parseDate(dateStr);
       if (isNaN(d.getTime())) return false;
       return (
@@ -200,19 +254,16 @@ export async function fetchHirockRows(
       );
     })
     .map((row) => {
-      const qty = parseNum(row[5]);   // F列: 数量
-      const rawG = parseNum(row[6]);  // G列: 数量100以上は合計金額、未満は単価
-      // 数量100以上: G列=合計金額 → 単価=合計÷数量（小数点2桁）、合計=G列
-      // 数量100未満: G列=単価 → 合計=数量×単価
-      const unitPrice = qty >= 100 ? Math.round((rawG / qty) * 100) / 100 : rawG;
-      const total = qty >= 100 ? rawG : qty * rawG;
+      const qty = parseNum(row[HIROCK_COL.quantity]);
+      const unitPrice = parseNum(row[HIROCK_COL.unitPrice]);
+      const amount = parseNum(row[HIROCK_COL.amount]);
       return {
-        date: (row[0] as string) ?? "",
-        storeName: (row[1] as string) ?? "",
-        itemName: (row[2] as string) ?? "",
+        date: cell(row, HIROCK_COL.orderDate),
+        storeName: cell(row, HIROCK_COL.store),
+        itemName: buildItemName(row),
         quantity: qty,
         unitPrice,
-        total,
+        total: amount || qty * unitPrice,
       };
     });
 }
