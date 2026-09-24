@@ -5,6 +5,7 @@ import { X } from "lucide-react";
 import { saveStoreMaster } from "@/app/master-actions";
 import {
   DEFAULT_LIQUID_ITEMS,
+  FREE_MAINTENANCE_NOTE,
   emptyStoreMaster,
   type StoreMaster,
   type StoreMasterMap,
@@ -98,7 +99,7 @@ export function StoreMasterDialog({ open, onClose, storeNames, masters, onSaved,
   async function handleSave() {
     if (!form || !store) return;
     if (form.rmStart && form.rmEnd && form.rmStart > form.rmEnd) {
-      setMsg("定期メンテナンスの期間が逆になっています");
+      setMsg("無償期間の開始日と終了日が逆になっています");
       return;
     }
     const liquidPrices: Record<string, number> = {};
@@ -297,7 +298,7 @@ export function StoreMasterDialog({ open, onClose, storeNames, masters, onSaved,
                       />
                     </div>
                     <div className="flex flex-col gap-1">
-                      <span className="text-xs text-muted-foreground">契約期間</span>
+                      <span className="text-xs text-muted-foreground">無償期間</span>
                       <div className="flex items-center gap-2">
                         <input type="date" value={form.rmStart} onChange={(e) => update({ rmStart: e.target.value })} className={inputCls} />
                         <span className="text-muted-foreground">〜</span>
@@ -327,7 +328,7 @@ export function StoreMasterDialog({ open, onClose, storeNames, masters, onSaved,
                     </div>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    実施月かつ契約期間内の月は、上の金額が自動で入ります。金額が空欄・期間外の場合はメイン画面で手動入力します。
+                    実施月の請求書に上の金額が自動で入ります。無償期間に含まれる月は0円になり、「{FREE_MAINTENANCE_NOTE}」と表示されます。金額が空欄の場合はメイン画面で手動入力します。
                   </p>
                 </section>
 

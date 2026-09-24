@@ -17,6 +17,7 @@ import {
 import {
   getRegularMaintenanceStatus,
   lookupLiquidPrice,
+  FREE_MAINTENANCE_NOTE,
   type StoreMasterMap,
 } from "@/lib/store-master";
 
@@ -180,7 +181,9 @@ export function InvoiceDashboard({
   const systemFee = parseFloat(systemFeeInput) || 0;
   const isSystemFeeUnfilled = systemFeeInput.trim() === "";
   // 定期メンテナンス：実施月のみ（3/6/9/12など）
-  const regMaintAmount = regMaint.isTargetMonth ? parseFloat(regMaintInput) || 0 : 0;
+  // 無償期間中は常に0円
+  const regMaintAmount = regMaint.isTargetMonth && !regMaint.isFree ? parseFloat(regMaintInput) || 0 : 0;
+  const showRegMaintLine = regMaint.isTargetMonth && (regMaint.isFree || regMaintAmount > 0);
   // ダイヤルパッド通信費：鹿児島中山店のみ¥3,000
   const dialpadFee = selectedStore.includes("鹿児島中山") ? 3000 : 0;
   // マイクロファイバー分割料金：高崎棟高店のみ
@@ -277,9 +280,16 @@ export function InvoiceDashboard({
     }
 
     // 3.5 定期メンテナンス（実施月のみ）
-    if (regMaintAmount > 0) {
+    if (showRegMaintLine) {
       details.push({ date: "", name: "【定期メンテナンス】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
-      details.push({ date: billingDate, name: "定期メンテナンス", qty: 1, unitPrice: regMaintAmount, amount: regMaintAmount, detail: regMaint.rangeLabel ? `契約期間 ${regMaint.rangeLabel}` : "" });
+      details.push({
+        date: billingDate,
+        name: "定期メンテナンス",
+        qty: 1,
+        unitPrice: regMaintAmount,
+        amount: regMaintAmount,
+        detail: regMaint.isFree ? `${FREE_MAINTENANCE_NOTE}（無償期間 ${regMaint.rangeLabel}）` : "",
+      });
     }
 
     // 4. 現場応援セクション
@@ -537,11 +547,11 @@ export function InvoiceDashboard({
     <tbody>${maintenanceRows}</tbody>
   </table>`}
 </div>
-${regMaintAmount > 0 ? `<div class="section">
+${showRegMaintLine ? `<div class="section">
   <div class="section-title">定期メンテナンス</div>
   <table>
     <thead><tr><th>項目</th><th>備考</th><th class="num">金額</th></tr></thead>
-    <tbody><tr><td>定期メンテナンス</td><td>${regMaint.rangeLabel ? `契約期間 ${regMaint.rangeLabel}` : ""}</td><td class="num">${fmt(regMaintAmount)}</td></tr></tbody>
+    <tbody><tr><td>定期メンテナンス</td><td>${regMaint.isFree ? `${FREE_MAINTENANCE_NOTE}<br/><span style="color:#64748b;">無償期間 ${regMaint.rangeLabel}</span>` : ""}</td><td class="num">${fmt(regMaintAmount)}</td></tr></tbody>
   </table>
 </div>` : ""}
 <div class="section">
@@ -573,7 +583,7 @@ ${regMaintAmount > 0 ? `<div class="section">
 <div class="summary">
   <div class="summary-row"><span class="label">液剤代 小計</span><span class="amount">${fmt(apikaTotal)}</span></div>
   <div class="summary-row"><span class="label">メンテナンス</span><span class="amount">${fmt(maintenanceAmount)}</span></div>
-  ${regMaintAmount > 0 ? `<div class="summary-row"><span class="label">定期メンテナンス</span><span class="amount">${fmt(regMaintAmount)}</span></div>` : ""}
+  ${showRegMaintLine ? `<div class="summary-row"><span class="label">定期メンテナンス</span><span class="amount">${fmt(regMaintAmount)}</span></div>` : ""}
   <div class="summary-row"><span class="label">消耗品 小計</span><span class="amount">${fmt(hirockTotal)}</span></div>
   <div class="summary-row"><span class="label">システム利用料</span><span class="amount">${fmt(systemFee + dialpadFee)}</span></div>
   <div class="summary-row"><span class="label">ロイヤリティ（税抜）</span><span class="amount">${fmt(royaltyAmountExTax)}</span></div>
@@ -915,27 +925,35 @@ ${regMaintAmount > 0 ? `<div class="section">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm text-foreground">定期メンテナンス</span>
-                    {regMaint.rangeLabel && (
-                      <span className="text-xs text-muted-foreground">契約期間 {regMaint.rangeLabel}</span>
-                    )}
-                    {regMaint.defaultAmount !== null ? (
+                    {regMaint.isFree ? (
+                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700">無償期間中</span>
+                    ) : regMaint.defaultAmount !== null ? (
                       <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">マスタ</span>
-                    ) : !regMaint.inRange ? (
-                      <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] font-medium text-yellow-800">契約期間外</span>
                     ) : (
                       <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] font-medium text-yellow-800">マスタ未設定</span>
                     )}
                   </div>
-                  <input
-                    type="number"
-                    min={0}
-                    value={regMaintInput}
-                    onChange={(e) => setRegMaintInput(e.target.value)}
-                    className="w-32 rounded border border-border bg-card px-2 py-1 text-right text-sm text-foreground tabular-nums focus:outline-none focus:ring-1 focus:ring-primary/20"
-                    placeholder="金額を入力"
-                  />
+                  {regMaint.isFree ? (
+                    <span className="font-bold text-foreground tabular-nums">{fmt(0)}</span>
+                  ) : (
+                    <input
+                      type="number"
+                      min={0}
+                      value={regMaintInput}
+                      onChange={(e) => setRegMaintInput(e.target.value)}
+                      className="w-32 rounded border border-border bg-card px-2 py-1 text-right text-sm text-foreground tabular-nums focus:outline-none focus:ring-1 focus:ring-primary/20"
+                      placeholder="金額を入力"
+                    />
+                  )}
                 </div>
-                <p className="text-xs text-muted-foreground">実施月のため表示しています。請求しない場合は空欄（または0）のままにしてください。</p>
+                {regMaint.isFree ? (
+                  <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2">
+                    <p className="text-sm font-medium text-emerald-800">{FREE_MAINTENANCE_NOTE}</p>
+                    <p className="text-xs text-emerald-700 mt-0.5">無償期間 {regMaint.rangeLabel}</p>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">実施月のため表示しています。請求しない場合は空欄（または0）のままにしてください。</p>
+                )}
               </div>
             </InvoiceSection>
           )}

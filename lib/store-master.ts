@@ -12,7 +12,7 @@ export type StoreMaster = {
   regularMaintenance: {
     /** 金額。null = 未設定（メイン画面で手動入力） */
     amount: number | null;
-    /** 契約期間 YYYY/MM/DD（空文字 = 指定なし） */
+    /** 無償期間 YYYY/MM/DD（空文字 = 指定なし）。この期間中は定期メンテナンス代金0円 */
     start: string;
     end: string;
     /** 実施月（1〜12） */
@@ -83,14 +83,16 @@ function parseYmd(s: string): Date | null {
   return new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
 }
 
+export const FREE_MAINTENANCE_NOTE = "無償期間のため、定期メンテナンス費用はいただきません。";
+
 export type RegularMaintenanceStatus = {
   /** 選択中の月が実施月か（= 画面に表示するか） */
   isTargetMonth: boolean;
-  /** 契約期間内か（期間未指定なら true） */
-  inRange: boolean;
-  /** マスタから自動で入れる金額（未設定・期間外なら null） */
+  /** 選択中の月が無償期間に含まれるか（期間未指定なら false） */
+  isFree: boolean;
+  /** マスタから自動で入れる金額（無償期間中は 0、未設定なら null） */
   defaultAmount: number | null;
-  /** 期間表示用ラベル */
+  /** 無償期間の表示用ラベル */
   rangeLabel: string;
 };
 
@@ -105,16 +107,16 @@ export function getRegularMaintenanceStatus(
 
   const start = rm?.start ? parseYmd(rm.start) : null;
   const end = rm?.end ? parseYmd(rm.end) : null;
-  let inRange = true;
-  if (p) {
+  // 無償期間：選択月が期間に1日でも重なれば無償
+  let isFree = false;
+  if (p && (start || end)) {
     const monthStart = new Date(p.year, p.month - 1, 1);
     const monthEnd = new Date(p.year, p.month, 0);
-    if (start && monthEnd < start) inRange = false;
-    if (end && monthStart > end) inRange = false;
+    isFree = !(start && monthEnd < start) && !(end && monthStart > end);
   }
 
   const rangeLabel = rm && (rm.start || rm.end) ? `${rm.start || ""}〜${rm.end || ""}` : "";
-  const defaultAmount = rm && rm.amount !== null && inRange ? rm.amount : null;
+  const defaultAmount = isFree ? 0 : rm && rm.amount !== null ? rm.amount : null;
 
-  return { isTargetMonth, inRange, defaultAmount, rangeLabel };
+  return { isTargetMonth, isFree, defaultAmount, rangeLabel };
 }

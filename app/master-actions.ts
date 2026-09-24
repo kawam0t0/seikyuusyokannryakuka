@@ -10,7 +10,7 @@ import {
 // --------------------------------------------------------
 // STORE_MASTER シート
 // A=店舗名, B=ロイヤリティ率(%), C=液剤単価(JSON), D=定期メンテ金額,
-// E=定期メンテ開始日, F=定期メンテ終了日, G=定期メンテ実施月(カンマ区切り),
+// E=定期メンテ無償期間開始日, F=定期メンテ無償期間終了日, G=定期メンテ実施月(カンマ区切り),
 // H=システム利用料, I=更新日時
 // 空欄 = 未設定（メイン画面で手動入力）
 // --------------------------------------------------------
@@ -20,8 +20,8 @@ const HEADER = [
   "ロイヤリティ率(%)",
   "液剤単価(JSON)",
   "定期メンテ金額",
-  "定期メンテ開始日",
-  "定期メンテ終了日",
+  "定期メンテ無償期間開始日",
+  "定期メンテ無償期間終了日",
   "定期メンテ実施月",
   "システム利用料",
   "更新日時",
@@ -99,7 +99,16 @@ async function ensureSheet() {
   const sheets = getSheetsClient();
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
   const exists = meta.data.sheets?.some((s) => s.properties?.title === SHEET);
-  if (exists) return;
+  if (exists) {
+    // ヘッダー名を最新に揃える（旧「定期メンテ開始日」等から更新）
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET}!A1:I1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [HEADER] },
+    });
+    return;
+  }
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
     requestBody: { requests: [{ addSheet: { properties: { title: SHEET } } }] },
