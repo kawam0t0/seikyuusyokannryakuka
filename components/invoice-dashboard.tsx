@@ -14,6 +14,11 @@ import {
   type PartnerInfo,
   type SupportRow,
 } from "@/app/invoice-actions";
+import {
+  getRegularMaintenanceStatus,
+  lookupLiquidPrice,
+  type StoreMasterMap,
+} from "@/lib/store-master";
 
 type InvoiceData = {
   apika: ApikaRow[];
@@ -24,6 +29,7 @@ type InvoiceData = {
 
 type Props = {
   storeNames: string[];
+  masters?: StoreMasterMap;
   // 売上ダッシュボードから引き継いだ値
   selectedStore: string;
   selectedPeriod: string;
@@ -34,6 +40,7 @@ type Props = {
 };
 
 export function InvoiceDashboard({
+  masters = {},
   selectedStore,
   selectedPeriod,
   royaltyAmountExTax,
@@ -61,6 +68,28 @@ export function InvoiceDashboard({
   type MaintenanceManualRow = { date: string; itemName: string; quantity: string; price: string; note: string };
   const emptyMaintenanceRow = (): MaintenanceManualRow => ({ date: "", itemName: "", quantity: "1", price: "", note: "" });
   const [maintenanceManualRows, setMaintenanceManualRows] = useState<MaintenanceManualRow[]>([]);
+
+  // ---- 店舗マスタ ----
+  const master = selectedStore ? masters[selectedStore] : undefined;
+  // 液剤単価の手動上書き key=APIKA行インデックス value=入力値
+  const [apikaPriceOverrides, setApikaPriceOverrides] = useState<Record<number, string>>({});
+  // システム利用料（マスタ値 or 手動入力）
+  const [systemFeeInput, setSystemFeeInput] = useState("");
+  // 定期メンテナンス（マスタ値 or 手動入力）
+  const [regMaintInput, setRegMaintInput] = useState("");
+  const regMaint = getRegularMaintenanceStatus(master, selectedPeriod);
+  const masterSystemFee = master?.systemFee ?? null;
+
+  // 店舗・期間・マスタが変わったら、マスタの値を初期値としてセット
+  useEffect(() => {
+    setSystemFeeInput(masterSystemFee !== null ? String(masterSystemFee) : "");
+  }, [selectedStore, selectedPeriod, masterSystemFee]);
+  useEffect(() => {
+    setRegMaintInput(regMaint.isTargetMonth && regMaint.defaultAmount !== null ? String(regMaint.defaultAmount) : "");
+  }, [selectedStore, selectedPeriod, regMaint.isTargetMonth, regMaint.defaultAmount]);
+  useEffect(() => {
+    setApikaPriceOverrides({});
+  }, [selectedStore, selectedPeriod]);
 
   // 高崎棟高店：マイクロファイバー分割料金
   const MICROFIBER_FEE = 10000;
@@ -114,7 +143,22 @@ export function InvoiceDashboard({
     }
   }, [selectedStore, selectedPeriod, hirockRefreshKey, loadInvoice]);
 
-  const apikaTotal = invoiceData?.apika.reduce((s, r) => s + r.total, 0) ?? 0;
+  // 液剤代：単価は 手動上書き > 店舗マスタ > APIKAシート の優先順
+  const apikaRows = (invoiceData?.apika ?? []).map((r, i) => {
+    const override = apikaPriceOverrides[i];
+    const masterPrice = lookupLiquidPrice(master, r.itemName);
+    let unitPrice = r.unitPrice;
+    let source: "manual" | "master" | "sheet" = "sheet";
+    if (override !== undefined && override !== "") {
+      unitPrice = parseFloat(override) || 0;
+      source = "manual";
+    } else if (masterPrice !== null) {
+      unitPrice = masterPrice;
+      source = "master";
+    }
+    return { ...r, unitPrice, total: r.quantity * unitPrice, source };
+  });
+  const apikaTotal = apikaRows.reduce((s, r) => s + r.total, 0);
   const hirockTotal = invoiceData?.hirock.reduce((s, r) => s + r.total, 0) ?? 0;
   const supportTotal = invoiceData?.support.reduce((s, r) => s + r.total, 0) ?? 0;
   // 消耗品手動追加分の合計
@@ -132,13 +176,16 @@ export function InvoiceDashboard({
   // メンテナンスデータがあるのに金額未入力（0）の行が1件でもある場合はCSV不可
   const hasMaintenanceUnfilled = (invoiceData?.maintenance ?? []).some((_, i) => (maintenancePrices[i] ?? 0) === 0)
     || maintenanceManualRows.some((r) => !r.price || parseFloat(r.price) === 0);
-  // システム利用料：高崎棟高店のみ¥17,500、他は¥35,000
-  const systemFee = selectedStore.includes("高崎棟高") ? 17500 : 35000;
+  // システム利用料：店舗マスタの値（未設定なら手動入力）
+  const systemFee = parseFloat(systemFeeInput) || 0;
+  const isSystemFeeUnfilled = systemFeeInput.trim() === "";
+  // 定期メンテナンス：実施月のみ（3/6/9/12など）
+  const regMaintAmount = regMaint.isTargetMonth ? parseFloat(regMaintInput) || 0 : 0;
   // ダイヤルパッド通信費：鹿児島中山店のみ¥3,000
   const dialpadFee = selectedStore.includes("鹿児島中山") ? 3000 : 0;
   // マイクロファイバー分割料金：高崎棟高店のみ
   const microfiberFee = isTakasaki ? MICROFIBER_FEE : 0;
-  const grandTotal = apikaTotal + (hirockTotal + hirockManualTotal) + maintenanceAmount + disposalFeeAmount + supportTotal + systemFee + dialpadFee + microfiberFee + royaltyAmountExTax;
+  const grandTotal = apikaTotal + (hirockTotal + hirockManualTotal) + maintenanceAmount + disposalFeeAmount + regMaintAmount + supportTotal + systemFee + dialpadFee + microfiberFee + royaltyAmountExTax;
 
   async function handleSaveSupport() {
     if (!selectedStore || !selectedPeriod) return;
@@ -188,9 +235,9 @@ export function InvoiceDashboard({
     const details: DetailRow[] = [];
 
     // 1. 液剤代セクション
-    if (d.apika.length > 0) {
+    if (apikaRows.length > 0) {
       details.push({ date: "", name: "【液剤代】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
-      d.apika.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity, unitPrice: r.unitPrice, amount: r.total }));
+      apikaRows.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.quantity, unitPrice: r.unitPrice, amount: r.total }));
     }
 
     // 2. 消耗品セクション（スプレッドシート + 手動追加）
@@ -227,6 +274,12 @@ export function InvoiceDashboard({
       if (includeDisposalFee) {
         details.push({ date: billingDate, name: "部品処分費用", qty: 1, unitPrice: DISPOSAL_FEE, amount: DISPOSAL_FEE });
       }
+    }
+
+    // 3.5 定期メンテナンス（実施月のみ）
+    if (regMaintAmount > 0) {
+      details.push({ date: "", name: "【定期メンテナンス】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
+      details.push({ date: billingDate, name: "定期メンテナンス", qty: 1, unitPrice: regMaintAmount, amount: regMaintAmount, detail: regMaint.rangeLabel ? `契約期間 ${regMaint.rangeLabel}` : "" });
     }
 
     // 4. 現場応援セクション
@@ -376,7 +429,7 @@ export function InvoiceDashboard({
     if (!invoiceData || !selectedStore || !selectedPeriod) return;
     const d = invoiceData;
 
-    const apikaRows = d.apika.map((r) => `
+    const apikaPrintRows = apikaRows.map((r) => `
       <tr>
         <td>${r.date}</td>
         <td>${r.itemName}</td>
@@ -469,10 +522,10 @@ export function InvoiceDashboard({
 </div>
 <div class="section">
   <div class="section-title">液剤代（APIKA）</div>
-  ${d.apika.length === 0 ? '<p class="no-data">該当データなし</p>' : `
+  ${apikaRows.length === 0 ? '<p class="no-data">該当データなし</p>' : `
   <table>
     <thead><tr><th>日付</th><th>品名</th><th class="num">数量</th><th class="num">単価</th><th class="num">合計</th></tr></thead>
-    <tbody>${apikaRows}</tbody>
+    <tbody>${apikaPrintRows}</tbody>
     <tfoot><tr class="subtotal"><td colspan="4">小計</td><td class="num">${fmt(apikaTotal)}</td></tr></tfoot>
   </table>`}
 </div>
@@ -484,6 +537,13 @@ export function InvoiceDashboard({
     <tbody>${maintenanceRows}</tbody>
   </table>`}
 </div>
+${regMaintAmount > 0 ? `<div class="section">
+  <div class="section-title">定期メンテナンス</div>
+  <table>
+    <thead><tr><th>項目</th><th>備考</th><th class="num">金額</th></tr></thead>
+    <tbody><tr><td>定期メンテナンス</td><td>${regMaint.rangeLabel ? `契約期間 ${regMaint.rangeLabel}` : ""}</td><td class="num">${fmt(regMaintAmount)}</td></tr></tbody>
+  </table>
+</div>` : ""}
 <div class="section">
   <div class="section-title">消耗品（HIROCK）</div>
   ${d.hirock.length === 0 ? '<p class="no-data">該当データなし</p>' : `
@@ -513,7 +573,9 @@ export function InvoiceDashboard({
 <div class="summary">
   <div class="summary-row"><span class="label">液剤代 小計</span><span class="amount">${fmt(apikaTotal)}</span></div>
   <div class="summary-row"><span class="label">メンテナンス</span><span class="amount">${fmt(maintenanceAmount)}</span></div>
+  ${regMaintAmount > 0 ? `<div class="summary-row"><span class="label">定期メンテナンス</span><span class="amount">${fmt(regMaintAmount)}</span></div>` : ""}
   <div class="summary-row"><span class="label">消耗品 小計</span><span class="amount">${fmt(hirockTotal)}</span></div>
+  <div class="summary-row"><span class="label">システム利用料</span><span class="amount">${fmt(systemFee + dialpadFee)}</span></div>
   <div class="summary-row"><span class="label">ロイヤリティ（税抜）</span><span class="amount">${fmt(royaltyAmountExTax)}</span></div>
   <div class="summary-row"><span class="label">合計（税抜）</span><span class="amount" style="font-size:16px;">${fmt(grandTotal)}</span></div>
 </div>
@@ -549,8 +611,8 @@ export function InvoiceDashboard({
             <div className="flex flex-col items-end gap-1">
               <button
                 onClick={handleCsvDownload}
-                disabled={hasMaintenanceUnfilled}
-                title={hasMaintenanceUnfilled ? "メンテナンスの金額をすべて入力してください" : undefined}
+                disabled={hasMaintenanceUnfilled || isSystemFeeUnfilled}
+                title={hasMaintenanceUnfilled ? "メンテナンスの金額をすべて入力してください" : isSystemFeeUnfilled ? "システム利用料を入力してください" : undefined}
                 className="flex items-center gap-2 rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -560,6 +622,9 @@ export function InvoiceDashboard({
               </button>
               {hasMaintenanceUnfilled && (
                 <p className="text-xs text-red-500 font-medium">メンテナンスの金額をすべて入力してください</p>
+              )}
+              {isSystemFeeUnfilled && (
+                <p className="text-xs text-red-500 font-medium">システム利用料を入力してください</p>
               )}
             </div>
             <button
@@ -602,12 +667,42 @@ export function InvoiceDashboard({
                   </tr>
                 </thead>
                 <tbody>
-                  {invoiceData.apika.map((r, i) => (
+                  {apikaRows.map((r, i) => (
                     <tr key={i} className={`border-b border-border ${i % 2 === 0 ? "bg-card" : "bg-muted/20"}`}>
                       <td className="px-4 py-2.5 text-foreground tabular-nums">{r.date}</td>
                       <td className="px-4 py-2.5 text-foreground">{r.itemName}</td>
                       <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{r.quantity}</td>
-                      <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{fmtNum(r.unitPrice)}</td>
+                      <td className="px-4 py-2 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap ${
+                              r.source === "master"
+                                ? "bg-green-100 text-green-700"
+                                : r.source === "manual"
+                                ? "bg-blue-100 text-blue-700"
+                                : "bg-muted text-muted-foreground"
+                            }`}
+                          >
+                            {r.source === "master" ? "マスタ" : r.source === "manual" ? "手動" : "シート"}
+                          </span>
+                          <input
+                            type="number"
+                            min={0}
+                            value={apikaPriceOverrides[i] ?? String(r.unitPrice)}
+                            onChange={(e) => setApikaPriceOverrides((prev) => ({ ...prev, [i]: e.target.value }))}
+                            className="w-24 rounded border border-border bg-card px-2 py-1 text-right text-xs text-foreground tabular-nums focus:outline-none focus:ring-1 focus:ring-primary/20"
+                          />
+                          {apikaPriceOverrides[i] !== undefined && (
+                            <button
+                              onClick={() => setApikaPriceOverrides((prev) => { const n = { ...prev }; delete n[i]; return n; })}
+                              className="text-[10px] text-muted-foreground underline hover:text-foreground whitespace-nowrap"
+                              title="マスタ／シートの単価に戻す"
+                            >
+                              戻す
+                            </button>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-4 py-2.5 text-right font-semibold text-foreground tabular-nums">{fmtNum(r.total)}</td>
                     </tr>
                   ))}
@@ -813,6 +908,38 @@ export function InvoiceDashboard({
             )}
           </InvoiceSection>
 
+          {/* 3.5 定期メンテナンス（実施月のみ表示） */}
+          {regMaint.isTargetMonth && (
+            <InvoiceSection title="定期メンテナンス" color="bg-sky-500" total={regMaintAmount} isEmpty={false}>
+              <div className="p-4 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm text-foreground">定期メンテナンス</span>
+                    {regMaint.rangeLabel && (
+                      <span className="text-xs text-muted-foreground">契約期間 {regMaint.rangeLabel}</span>
+                    )}
+                    {regMaint.defaultAmount !== null ? (
+                      <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">マスタ</span>
+                    ) : !regMaint.inRange ? (
+                      <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] font-medium text-yellow-800">契約期間外</span>
+                    ) : (
+                      <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] font-medium text-yellow-800">マスタ未設定</span>
+                    )}
+                  </div>
+                  <input
+                    type="number"
+                    min={0}
+                    value={regMaintInput}
+                    onChange={(e) => setRegMaintInput(e.target.value)}
+                    className="w-32 rounded border border-border bg-card px-2 py-1 text-right text-sm text-foreground tabular-nums focus:outline-none focus:ring-1 focus:ring-primary/20"
+                    placeholder="金額を入力"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">実施月のため表示しています。請求しない場合は空欄（または0）のままにしてください。</p>
+              </div>
+            </InvoiceSection>
+          )}
+
           {/* 4. 現場応援 */}
           <InvoiceSection title="現場応援" color="bg-orange-500" total={supportTotal} isEmpty={false}>
             {/* 保存済みデータ表示 */}
@@ -895,8 +1022,25 @@ export function InvoiceDashboard({
           {/* 5. システム利用料 */}
           <InvoiceSection title="システム利用料" color="bg-slate-500" total={systemFee + dialpadFee} isEmpty={false}>
             <div className={`p-4 flex justify-between items-center ${dialpadFee > 0 ? "border-b border-border" : ""}`}>
-              <span className="text-sm text-foreground">システム利用料（月額）</span>
-              <span className="font-bold text-foreground tabular-nums">{fmt(systemFee)}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-foreground">システム利用料（月額）</span>
+                {masterSystemFee !== null ? (
+                  <span className="rounded-full bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">マスタ</span>
+                ) : (
+                  <span className="rounded-full bg-yellow-100 px-2 py-0.5 text-[10px] font-medium text-yellow-800">マスタ未設定</span>
+                )}
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <input
+                  type="number"
+                  min={0}
+                  value={systemFeeInput}
+                  onChange={(e) => setSystemFeeInput(e.target.value)}
+                  className={`w-32 rounded border px-2 py-1 text-right text-sm text-foreground tabular-nums focus:outline-none focus:ring-1 ${isSystemFeeUnfilled ? "border-red-400 bg-red-50 focus:ring-red-300" : "border-border bg-card focus:ring-primary/20"}`}
+                  placeholder="金額を入力"
+                />
+                {isSystemFeeUnfilled && <span className="text-xs text-red-500 font-medium">金額の入力が必要です</span>}
+              </div>
             </div>
             {dialpadFee > 0 && (
               <div className="p-4 flex justify-between items-center">
@@ -945,7 +1089,7 @@ export function InvoiceDashboard({
             <div>
               <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">請求合計（税抜）</p>
               <p className="text-xs text-muted-foreground mt-1">
-                液剤代 + 消耗品 + メンテナンス + 現場応援 + システム利用料
+                液剤代 + 消耗品 + メンテナンス{regMaintAmount > 0 ? " + 定期メンテナンス" : ""} + 現場応援 + システム利用料
                 {dialpadFee > 0 ? " + ダイヤルパッド通信費" : ""}
                 {microfiberFee > 0 ? " + その他" : ""}
                 {" + ロイヤリティ"}

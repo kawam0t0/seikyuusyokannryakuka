@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useMemo, useCallback, useTransition } from "react";
+import { useState, useMemo, useCallback, useTransition, useEffect } from "react";
+import type { StoreMasterMap } from "@/lib/store-master";
 import { ChevronDown } from "lucide-react";
 import { fetchSalesSummary, deleteCashRow, updateCashRow, type SalesSummary } from "@/app/actions";
 import { CsvUploader } from "@/components/csv-uploader";
@@ -24,15 +25,20 @@ const PERIODS = generatePeriods();
 
 type Props = {
   storeNames: string[];
+  masters?: StoreMasterMap;
   onStateChange?: (state: { selectedStore: string; selectedPeriod: string; royaltyAmountExTax: number; cashExTax: number; cashlessExTax: number; memberExTax: number }) => void;
 };
 
-export function CockpitDashboard({ storeNames, onStateChange }: Props) {
+const DEFAULT_ROYALTY_RATE = 3;
+
+export function CockpitDashboard({ storeNames, masters = {}, onStateChange }: Props) {
   const hasStores = storeNames.length > 0;
 
   const [selectedStore, setSelectedStore] = useState("");
   const [selectedPeriod, setSelectedPeriod] = useState("");
-  const [royaltyRate, setRoyaltyRate] = useState(3);
+  const [royaltyRate, setRoyaltyRate] = useState(DEFAULT_ROYALTY_RATE);
+  // 店舗マスタのロイヤリティ率（未設定なら null）
+  const masterRoyaltyRate = selectedStore ? masters[selectedStore]?.royaltyRate ?? null : null;
   const [summary, setSummary] = useState<SalesSummary | null>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [isPending, startTransition] = useTransition();
@@ -133,17 +139,6 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
           setDeletedCashIndices(new Set());
           setSavingRows(new Set());
           setDeletingRows(new Set());
-          // 状態を AppShell に通知
-          if (onStateChange) {
-            onStateChange({
-              selectedStore: store,
-              selectedPeriod: period,
-              royaltyAmountExTax: Math.floor((Math.floor((result.cash + result.cashless + result.member) / 1.1)) * (royaltyRate / 100)),
-              cashExTax: Math.floor(result.cash / 1.1),
-              cashlessExTax: Math.floor(result.cashless / 1.1),
-              memberExTax: Math.floor(result.member / 1.1),
-            });
-          }
         } catch (e) {
           setSummary(null);
           setErrorMsg(
@@ -152,8 +147,27 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
         }
       });
     },
-    [onStateChange, royaltyRate]
+    []
   );
+
+  // 店舗を切り替えた／マスタが更新されたら、マスタのロイヤリティ率を初期値としてセット
+  useEffect(() => {
+    if (!selectedStore) return;
+    setRoyaltyRate(masterRoyaltyRate ?? DEFAULT_ROYALTY_RATE);
+  }, [selectedStore, masterRoyaltyRate]);
+
+  // 売上・ロイヤリティ率が変わるたびに請求書側へ通知
+  useEffect(() => {
+    if (!onStateChange || !summary) return;
+    onStateChange({
+      selectedStore,
+      selectedPeriod,
+      royaltyAmountExTax,
+      cashExTax,
+      cashlessExTax,
+      memberExTax,
+    });
+  }, [onStateChange, summary, selectedStore, selectedPeriod, royaltyAmountExTax, cashExTax, cashlessExTax, memberExTax]);
 
   function handleStoreChange(store: string) {
     setSelectedStore(store);
@@ -413,19 +427,6 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                                 onChange={(e) => {
                                   const val = Math.max(0, parseInt(e.target.value) || 0);
                                   setCashField(r.originalIndex, "amount", val);
-                                  if (summary && onStateChange) {
-                                    const newCash = cashRows.reduce((s, row, j) => s + (j === i ? val : row.editedAmount), 0);
-                                    const newTotal = newCash + summary.cashless + summary.member;
-                                    const newTotalExTax = Math.floor(newTotal / 1.1);
-                                    onStateChange({
-                                      selectedStore,
-                                      selectedPeriod,
-                                      royaltyAmountExTax: Math.floor(newTotalExTax * (royaltyRate / 100)),
-                                      cashExTax: Math.floor(newCash / 1.1),
-                                      cashlessExTax: Math.floor(summary.cashless / 1.1),
-                                      memberExTax: Math.floor(summary.member / 1.1),
-                                    });
-                                  }
                                 }}
                                 className={`${inputCls(cashOverrides[r.originalIndex]?.amount !== undefined)} text-right tabular-nums`}
                               />
@@ -530,27 +531,27 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
 
               {/* ロイヤリティ率 */}
               <div className="space-y-4">
-                <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
-                  ロイヤリティ率を選択
-                </p>
-                <div className="flex flex-wrap gap-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <p className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
+                    ロイヤリティ率を選択
+                  </p>
+                  {masterRoyaltyRate !== null ? (
+                    <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-700">
+                      マスタ設定: {masterRoyaltyRate}%
+                    </span>
+                  ) : (
+                    selectedStore && (
+                      <span className="rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800">
+                        マスタ未設定（手動で選択してください）
+                      </span>
+                    )
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
                   {[0, 1, 2, 3, 4, 5].map((rate) => (
                     <button
                       key={rate}
-                      onClick={() => {
-                        setRoyaltyRate(rate);
-                        if (summary && onStateChange) {
-                          const exTax = Math.floor((summary.cash + summary.cashless + summary.member) / 1.1);
-                          onStateChange({
-                            selectedStore,
-                            selectedPeriod,
-                            royaltyAmountExTax: Math.floor(exTax * (rate / 100)),
-                            cashExTax: Math.floor(summary.cash / 1.1),
-                            cashlessExTax: Math.floor(summary.cashless / 1.1),
-                            memberExTax: Math.floor(summary.member / 1.1),
-                          });
-                        }
-                      }}
+                      onClick={() => setRoyaltyRate(rate)}
                       className={`w-14 rounded-lg py-2.5 text-sm font-semibold transition-all ${
                         royaltyRate === rate
                           ? "bg-primary text-primary-foreground ring-2 ring-primary/50 ring-offset-2 ring-offset-background"
@@ -560,6 +561,19 @@ export function CockpitDashboard({ storeNames, onStateChange }: Props) {
                       {rate}%
                     </button>
                   ))}
+                  {/* 任意の率（小数も可） */}
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      value={royaltyRate}
+                      onChange={(e) => setRoyaltyRate(Math.max(0, parseFloat(e.target.value) || 0))}
+                      className="w-20 rounded-lg border border-border bg-card px-2 py-2 text-right text-sm text-foreground tabular-nums focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/20"
+                      aria-label="ロイヤリティ率（任意）"
+                    />
+                    <span className="text-sm text-muted-foreground">%</span>
+                  </div>
                 </div>
               </div>
 
