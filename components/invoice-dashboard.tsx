@@ -14,6 +14,7 @@ import {
   type PartnerInfo,
   type SupportRow,
 } from "@/app/invoice-actions";
+import { fetchOtherItems, saveOtherItems, type OtherItem } from "@/app/other-actions";
 import {
   getRegularMaintenanceStatus,
   lookupLiquidPrice,
@@ -103,6 +104,20 @@ export function InvoiceDashboard({
   const [supportSaving, setSupportSaving] = useState(false);
   const [supportMsg, setSupportMsg] = useState("");
 
+  // その他請求項目（全店舗共通・OTHERシートに保存）
+  type OtherRow = { date: string; itemName: string; quantity: string; unitPrice: string; note: string };
+  const emptyOtherRow = (): OtherRow => ({ date: "", itemName: "", quantity: "1", unitPrice: "", note: "" });
+  const [otherRows, setOtherRows] = useState<OtherRow[]>([]);
+  const [otherVisible, setOtherVisible] = useState(false);
+  const [otherDirty, setOtherDirty] = useState(false);
+  const [otherSaving, setOtherSaving] = useState(false);
+  const [otherMsg, setOtherMsg] = useState("");
+  const updateOtherRows = (fn: (prev: OtherRow[]) => OtherRow[]) => {
+    setOtherRows(fn);
+    setOtherDirty(true);
+    setOtherMsg("");
+  };
+
   const fmt = (v: number) => `¥${v.toLocaleString("ja-JP")}`;
   // 小数を含む数値も表示できるフォーマット（整数なら小数点なし）
   const fmtNum = (v: number) => {
@@ -116,15 +131,27 @@ export function InvoiceDashboard({
     setErrorMsg("");
     startTransition(async () => {
       try {
-        const [apika, maintenance, hirock, support, partner] = await Promise.all([
+        const [apika, maintenance, hirock, support, partner, others] = await Promise.all([
           fetchApikaRows(store, period),
           fetchMaintenanceRows(store, period),
           fetchHirockRows(store, period),
           fetchSupportRows(store, period),
           fetchPartnerInfo(store),
+          fetchOtherItems(store, period),
         ]);
         setInvoiceData({ apika, maintenance, hirock, support });
         setPartnerInfo(partner);
+        // 保存済みのその他請求項目があれば表示ON
+        setOtherRows(others.map((o) => ({
+          date: o.date,
+          itemName: o.itemName,
+          quantity: String(o.quantity),
+          unitPrice: String(o.unitPrice),
+          note: o.note,
+        })));
+        setOtherVisible(others.length > 0);
+        setOtherDirty(false);
+        setOtherMsg("");
       } catch (e) {
         setErrorMsg(e instanceof Error ? e.message : "データ取得に失敗しました");
       }
@@ -188,7 +215,42 @@ export function InvoiceDashboard({
   const dialpadFee = selectedStore.includes("鹿児島中山") ? 3000 : 0;
   // マイクロファイバー分割料金：高崎棟高店のみ
   const microfiberFee = isTakasaki ? MICROFIBER_FEE : 0;
-  const grandTotal = apikaTotal + (hirockTotal + hirockManualTotal) + maintenanceAmount + disposalFeeAmount + regMaintAmount + supportTotal + systemFee + dialpadFee + microfiberFee + royaltyAmountExTax;
+  // その他請求項目（非表示のときは請求に含めない）
+  const otherLines = otherVisible
+    ? otherRows
+        .filter((r) => r.itemName.trim())
+        .map((r) => {
+          const qty = parseFloat(r.quantity) || 0;
+          const unit = parseFloat(r.unitPrice) || 0;
+          return { date: r.date, itemName: r.itemName.trim(), qty, unit, amount: qty * unit, note: r.note };
+        })
+    : [];
+  const otherTotal = otherLines.reduce((s, r) => s + r.amount, 0);
+  const grandTotal = apikaTotal + (hirockTotal + hirockManualTotal) + maintenanceAmount + disposalFeeAmount + regMaintAmount + supportTotal + systemFee + dialpadFee + microfiberFee + otherTotal + royaltyAmountExTax;
+
+  async function handleSaveOther() {
+    if (!selectedStore || !selectedPeriod) return;
+    const items: OtherItem[] = otherRows
+      .filter((r) => r.itemName.trim())
+      .map((r) => ({
+        date: r.date,
+        itemName: r.itemName.trim(),
+        quantity: parseFloat(r.quantity) || 0,
+        unitPrice: parseFloat(r.unitPrice) || 0,
+        note: r.note,
+      }));
+    setOtherSaving(true);
+    setOtherMsg("保存中...");
+    try {
+      const n = await saveOtherItems(selectedStore, selectedPeriod, items);
+      setOtherDirty(false);
+      setOtherMsg(n > 0 ? `${n} 件を保存しました。` : "保存しました（項目なし）。");
+    } catch (e) {
+      setOtherMsg(e instanceof Error ? e.message : "保存に失敗しました。");
+    } finally {
+      setOtherSaving(false);
+    }
+  }
 
   async function handleSaveSupport() {
     if (!selectedStore || !selectedPeriod) return;
@@ -309,6 +371,14 @@ export function InvoiceDashboard({
     if (microfiberFee > 0) {
       details.push({ date: "", name: "【その他】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
       details.push({ date: billingDate, name: "マイクロファイバー分割料金", qty: 1, unitPrice: microfiberFee, amount: microfiberFee });
+    }
+
+    // 5.6 その他請求項目
+    if (otherLines.length > 0) {
+      details.push({ date: "", name: "【その他請求項目】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
+      otherLines.forEach((r) =>
+        details.push({ date: normalizeDate(r.date || billingDate), name: r.itemName, qty: r.qty, unitPrice: r.unit, amount: r.amount, detail: r.note })
+      );
     }
 
     // 6. ロイヤリティセクション
@@ -448,6 +518,8 @@ export function InvoiceDashboard({
         <td style="text-align:right">${fmt(r.total)}</td>
       </tr>`).join("");
 
+    const esc = (v: string) =>
+      v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
     const fmtUnitPrice = (v: number) => {
       const isDecimal = !Number.isInteger(v);
       return `¥${v.toLocaleString("ja-JP", { minimumFractionDigits: isDecimal ? 2 : 0, maximumFractionDigits: 2 })}`;
@@ -563,6 +635,22 @@ ${showRegMaintLine ? `<div class="section">
     <tfoot><tr class="subtotal"><td colspan="4">小計</td><td class="num">${fmt(hirockTotal)}</td></tr></tfoot>
   </table>`}
 </div>
+${otherLines.length > 0 ? `<div class="section">
+  <div class="section-title">その他請求項目</div>
+  <table>
+    <thead><tr><th>日付</th><th>項目名</th><th class="num">数量</th><th class="num">単価</th><th>備考</th><th class="num">合計</th></tr></thead>
+    <tbody>${otherLines.map((r) => `
+      <tr>
+        <td>${esc(r.date)}</td>
+        <td>${esc(r.itemName)}</td>
+        <td class="num">${r.qty}</td>
+        <td class="num">${fmt(r.unit)}</td>
+        <td>${esc(r.note)}</td>
+        <td class="num">${fmt(r.amount)}</td>
+      </tr>`).join("")}</tbody>
+    <tfoot><tr class="subtotal"><td colspan="5">小計</td><td class="num">${fmt(otherTotal)}</td></tr></tfoot>
+  </table>
+</div>` : ""}
 <div class="section">
   <div class="section-title">ロイヤリティ（税抜）</div>
   <table>
@@ -586,6 +674,7 @@ ${showRegMaintLine ? `<div class="section">
   ${showRegMaintLine ? `<div class="summary-row"><span class="label">定期メンテナンス</span><span class="amount">${fmt(regMaintAmount)}</span></div>` : ""}
   <div class="summary-row"><span class="label">消耗品 小計</span><span class="amount">${fmt(hirockTotal)}</span></div>
   <div class="summary-row"><span class="label">システム利用料</span><span class="amount">${fmt(systemFee + dialpadFee)}</span></div>
+  ${otherLines.length > 0 ? `<div class="summary-row"><span class="label">その他請求項目</span><span class="amount">${fmt(otherTotal)}</span></div>` : ""}
   <div class="summary-row"><span class="label">ロイヤリティ（税抜）</span><span class="amount">${fmt(royaltyAmountExTax)}</span></div>
   <div class="summary-row"><span class="label">合計（税抜）</span><span class="amount" style="font-size:16px;">${fmt(grandTotal)}</span></div>
 </div>
@@ -1078,6 +1167,77 @@ ${showRegMaintLine ? `<div class="section">
             </InvoiceSection>
           )}
 
+          {/* 5.6 その他請求項目（全店舗・表示/非表示切替） */}
+          <InvoiceSection
+            title="その他請求項目"
+            color="bg-teal-500"
+            total={otherVisible ? otherTotal : undefined}
+            isEmpty={false}
+            titleExtra={
+              <label className="ml-3 flex items-center gap-1.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={otherVisible}
+                  onChange={(e) => {
+                    setOtherVisible(e.target.checked);
+                    if (e.target.checked && otherRows.length === 0) setOtherRows([emptyOtherRow()]);
+                  }}
+                  className="w-3.5 h-3.5 rounded accent-primary cursor-pointer"
+                />
+                <span className="text-xs text-muted-foreground">{otherVisible ? "表示中（請求に含む）" : "非表示（請求に含めない）"}</span>
+              </label>
+            }
+          >
+            {otherVisible ? (
+              <div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-border bg-muted">
+                      <th className="px-3 py-2 text-left text-muted-foreground font-semibold">日付</th>
+                      <th className="px-3 py-2 text-left text-muted-foreground font-semibold">項目名</th>
+                      <th className="px-3 py-2 text-right text-muted-foreground font-semibold">数量</th>
+                      <th className="px-3 py-2 text-right text-muted-foreground font-semibold">単価</th>
+                      <th className="px-3 py-2 text-left text-muted-foreground font-semibold">備考</th>
+                      <th className="px-3 py-2 text-right text-muted-foreground font-semibold">合計</th>
+                      <th className="px-3 py-2 text-center text-muted-foreground font-semibold">削除</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {otherRows.map((r, i) => {
+                      const qty = parseFloat(r.quantity) || 0;
+                      const unit = parseFloat(r.unitPrice) || 0;
+                      const set = (patch: Partial<typeof r>) => updateOtherRows((p) => p.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+                      return (
+                        <tr key={i} className="border-b border-border">
+                          <td className="px-3 py-1.5"><input type="date" value={r.date.replace(/\//g, "-")} onChange={(e) => set({ date: e.target.value.replace(/-/g, "/") })} className="rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" /></td>
+                          <td className="px-3 py-1.5"><input type="text" value={r.itemName} onChange={(e) => set({ itemName: e.target.value })} className="w-full rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" placeholder="項目名" /></td>
+                          <td className="px-3 py-1.5"><input type="number" min={0} step="any" value={r.quantity} onChange={(e) => set({ quantity: e.target.value })} className="w-16 text-right rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" /></td>
+                          <td className="px-3 py-1.5"><input type="number" min={0} value={r.unitPrice} onChange={(e) => set({ unitPrice: e.target.value })} className="w-24 text-right rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" placeholder="単価" /></td>
+                          <td className="px-3 py-1.5"><input type="text" value={r.note} onChange={(e) => set({ note: e.target.value })} className="w-full rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" placeholder="備考" /></td>
+                          <td className="px-3 py-1.5 text-right tabular-nums text-foreground">{fmt(qty * unit)}</td>
+                          <td className="px-3 py-1.5 text-center"><button onClick={() => updateOtherRows((p) => p.filter((_, j) => j !== i))} className="text-red-500 text-xs border border-red-200 rounded px-2 py-0.5 hover:bg-red-50">削除</button></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-border">
+                  <button onClick={() => updateOtherRows((p) => [...p, emptyOtherRow()])} className="rounded border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition">+ 行を追加</button>
+                  <button onClick={handleSaveOther} disabled={otherSaving} className="rounded bg-primary px-4 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50">
+                    {otherSaving ? "保存中..." : "スプレッドシートに保存"}
+                  </button>
+                  {otherDirty && !otherSaving && <span className="text-xs text-amber-600">未保存の変更があります</span>}
+                  {otherMsg && <span className="text-xs text-muted-foreground">{otherMsg}</span>}
+                </div>
+              </div>
+            ) : (
+              <p className="px-5 py-4 text-xs text-muted-foreground">
+                チェックを入れると、項目を自由に追加して請求に含められます。
+                {otherRows.some((r) => r.itemName.trim()) && "（入力済みの項目がありますが、非表示のため請求には含まれません）"}
+              </p>
+            )}
+          </InvoiceSection>
+
           {/* 6. ロイヤリティ */}
           <InvoiceSection title="ロイヤリティ（税抜）" color="bg-purple-500" total={royaltyAmountExTax} isEmpty={royaltyAmountExTax === 0}>
             {royaltyAmountExTax > 0 && (
@@ -1110,6 +1270,7 @@ ${showRegMaintLine ? `<div class="section">
                 液剤代 + 消耗品 + メンテナンス{regMaintAmount > 0 ? " + 定期メンテナンス" : ""} + 現場応援 + システム利用料
                 {dialpadFee > 0 ? " + ダイヤルパッド通信費" : ""}
                 {microfiberFee > 0 ? " + その他" : ""}
+                {otherTotal > 0 ? " + その他請求項目" : ""}
                 {" + ロイヤリティ"}
               </p>
             </div>
