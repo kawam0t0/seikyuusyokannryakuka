@@ -402,6 +402,73 @@ export async function appendSupportRows(
 }
 
 // --------------------------------------------------------
+// SUPPORTシート：店舗×請求月度の行を画面の内容で置き換え（自動保存用）
+// 対象月・対象店舗の既存行を削除してから、rows を追記する
+// --------------------------------------------------------
+export async function replaceSupportRows(
+  storeName: string,
+  period: string,
+  rows: SupportRow[]
+): Promise<void> {
+  const match = period.match(/(\d{4})年(\d{1,2})月度/);
+  if (!match || !storeName) return;
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+
+  const sheets = getSheetsClient();
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+  const sheet = meta.data.sheets?.find((s) => s.properties?.title === "SUPPORT");
+  const sheetId = sheet?.properties?.sheetId;
+  if (sheetId === undefined || sheetId === null) throw new Error("SUPPORTシートが見つかりません");
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "SUPPORT!A2:F",
+  });
+  const existing = res.data.values ?? [];
+
+  // fetchSupportRows と同じ条件で対象行を特定（シート上の0始まり行番号）
+  const targetIdx: number[] = [];
+  existing.forEach((row, i) => {
+    const dateStr = String(row[0] ?? "");
+    const store = String(row[1] ?? "");
+    const d = new Date(dateStr.replace(/\//g, "-"));
+    if (isNaN(d.getTime())) return;
+    if (d.getFullYear() === year && d.getMonth() + 1 === month && store.includes(storeName)) {
+      targetIdx.push(i + 1); // ヘッダー行ぶんずらす
+    }
+  });
+
+  // 下の行から削除（行番号がずれないように）
+  if (targetIdx.length > 0) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: targetIdx
+          .sort((a, b) => b - a)
+          .map((idx) => ({
+            deleteDimension: {
+              range: { sheetId, dimension: "ROWS", startIndex: idx, endIndex: idx + 1 },
+            },
+          })),
+      },
+    });
+  }
+
+  if (rows.length > 0) {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "SUPPORT!A:F",
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: {
+        values: rows.map((r) => [r.date, r.storeName, r.itemName, r.hours, r.unitPrice, r.total]),
+      },
+    });
+  }
+}
+
+// --------------------------------------------------------
 // Gemini を使って PDF バイナリを直接解析・構造化
 // pdf-parse は使わず Gemini のマルチモーダル機能を使用
 // --------------------------------------------------------

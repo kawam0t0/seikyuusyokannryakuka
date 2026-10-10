@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useTransition, useCallback, useEffect } from "react";
+import { useState, useTransition, useCallback, useEffect, useRef } from "react";
 import {
   fetchApikaRows,
   fetchMaintenanceRows,
   fetchHirockRows,
   fetchPartnerInfo,
   fetchSupportRows,
-  appendSupportRows,
+  replaceSupportRows,
   type ApikaRow,
   type MaintenanceRow,
   type HirockRow,
@@ -15,6 +15,7 @@ import {
   type SupportRow,
 } from "@/app/invoice-actions";
 import { fetchOtherItems, saveOtherItems, type OtherItem } from "@/app/other-actions";
+import { fetchDraft, saveDraft } from "@/app/draft-actions";
 import {
   getRegularMaintenanceStatus,
   lookupLiquidPrice,
@@ -40,6 +41,25 @@ type Props = {
   cashlessExTax: number;
   memberExTax: number;
 };
+
+// 行の識別キー（日付＋品名＋同一行の出現順）。シートの行番号が変わっても入力値を紐付けるため
+function rowKeys(rows: { date: string; itemName: string }[]): string[] {
+  const seen: Record<string, number> = {};
+  return rows.map((r) => {
+    const base = `${r.date}|${r.itemName}`;
+    seen[base] = (seen[base] ?? 0) + 1;
+    return `${base}|${seen[base]}`;
+  });
+}
+
+// "2026/5/3" などを input[type=date] 用の "2026-05-03" に揃える
+function toIsoDate(s: string): string {
+  const m = String(s).trim().match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+  return m ? `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}` : String(s);
+}
+
+// 自動保存の状態
+type SaveStatus = "idle" | "saving" | "saved" | "error";
 
 export function InvoiceDashboard({
   masters = {},
@@ -75,48 +95,39 @@ export function InvoiceDashboard({
   const master = selectedStore ? masters[selectedStore] : undefined;
   // 液剤単価の手動上書き key=APIKA行インデックス value=入力値
   const [apikaPriceOverrides, setApikaPriceOverrides] = useState<Record<number, string>>({});
-  // システム利用料（マスタ値 or 手動入力）
-  const [systemFeeInput, setSystemFeeInput] = useState("");
-  // 定期メンテナンス（マスタ値 or 手動入力）
-  const [regMaintInput, setRegMaintInput] = useState("");
   const regMaint = getRegularMaintenanceStatus(master, selectedPeriod);
   const masterSystemFee = master?.systemFee ?? null;
-
-  // 店舗・期間・マスタが変わったら、マスタの値を初期値としてセット
-  useEffect(() => {
-    setSystemFeeInput(masterSystemFee !== null ? String(masterSystemFee) : "");
-  }, [selectedStore, selectedPeriod, masterSystemFee]);
-  useEffect(() => {
-    setRegMaintInput(regMaint.isTargetMonth && regMaint.defaultAmount !== null ? String(regMaint.defaultAmount) : "");
-  }, [selectedStore, selectedPeriod, regMaint.isTargetMonth, regMaint.defaultAmount]);
-  useEffect(() => {
-    setApikaPriceOverrides({});
-  }, [selectedStore, selectedPeriod]);
+  // システム利用料・定期メンテナンス：手入力した場合だけ上書き値を持つ（null = マスタの値を使う）
+  const [systemFeeOverride, setSystemFeeOverride] = useState<string | null>(null);
+  const [regMaintOverride, setRegMaintOverride] = useState<string | null>(null);
+  const systemFeeInput = systemFeeOverride ?? (masterSystemFee !== null ? String(masterSystemFee) : "");
+  const regMaintInput =
+    regMaintOverride ?? (regMaint.isTargetMonth && regMaint.defaultAmount !== null ? String(regMaint.defaultAmount) : "");
 
   // 高崎棟高店：マイクロファイバー分割料金
   const MICROFIBER_FEE = 10000;
   const isTakasaki = selectedStore.includes("高崎棟高");
 
   // 現場応援入力フォーム（複数行対応）
-  type SupportEntry = { date: string; itemName: string; hours: string; unitPrice: string };
-  const emptySupportEntry = (): SupportEntry => ({ date: "", itemName: "現場応援", hours: "", unitPrice: "1500" });
-  const [supportEntries, setSupportEntries] = useState<SupportEntry[]>([emptySupportEntry()]);
-  const [supportSaving, setSupportSaving] = useState(false);
-  const [supportMsg, setSupportMsg] = useState("");
+  // 日付・時間が入った行はSUPPORTシートへ、入力途中の行は下書き（INPUTシート）へ自動保存
+  type SupportEntry = { date: string; itemName: string; hours: string; unitPrice: string; storeName: string };
+  const emptySupportEntry = (): SupportEntry => ({ date: "", itemName: "現場応援", hours: "", unitPrice: "1500", storeName: "" });
+  const [supportRows, setSupportRows] = useState<SupportEntry[]>([]);
+  const isSupportComplete = (e: SupportEntry) => !!e.date && (parseFloat(e.hours) || 0) > 0;
 
   // その他請求項目（全店舗共通・OTHERシートに保存）
   type OtherRow = { date: string; itemName: string; quantity: string; unitPrice: string; note: string };
   const emptyOtherRow = (): OtherRow => ({ date: "", itemName: "", quantity: "1", unitPrice: "", note: "" });
   const [otherRows, setOtherRows] = useState<OtherRow[]>([]);
   const [otherVisible, setOtherVisible] = useState(false);
-  const [otherDirty, setOtherDirty] = useState(false);
-  const [otherSaving, setOtherSaving] = useState(false);
-  const [otherMsg, setOtherMsg] = useState("");
-  const updateOtherRows = (fn: (prev: OtherRow[]) => OtherRow[]) => {
-    setOtherRows(fn);
-    setOtherDirty(true);
-    setOtherMsg("");
-  };
+  const updateOtherRows = (fn: (prev: OtherRow[]) => OtherRow[]) => setOtherRows(fn);
+
+  // ---- 自動保存 ----
+  const currentKey = selectedStore && selectedPeriod ? `${selectedStore}|${selectedPeriod}` : "";
+  // 読み込みが終わって画面に反映済みのキー（これと currentKey が一致しているときだけ保存する）
+  const [hydratedKey, setHydratedKey] = useState("");
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [saveError, setSaveError] = useState("");
 
   const fmt = (v: number) => `¥${v.toLocaleString("ja-JP")}`;
   // 小数を含む数値も表示できるフォーマット（整数なら小数点なし）
@@ -126,50 +137,159 @@ export function InvoiceDashboard({
     return `¥${v.toLocaleString("ja-JP", { minimumFractionDigits: isDecimal ? 2 : 0, maximumFractionDigits: 2 })}`;
   };
 
+  // 自動保存用の内部状態
+  type Snapshot = { draft: Draft; support: SupportRow[]; other: OtherItem[] };
+  type Draft = {
+    maintenancePrices: Record<string, number>;
+    maintenanceManualRows: MaintenanceManualRow[];
+    hirockManualRows: HirockManualRow[];
+    includeDisposalFee: boolean;
+    apikaPriceOverrides: Record<string, string>;
+    systemFeeOverride: string | null;
+    regMaintOverride: string | null;
+    otherVisible: boolean;
+    supportPending: SupportEntry[];
+  };
+  const cacheRef = useRef(new Map<string, Snapshot>()); // 画面内キャッシュ（店舗を戻したとき即復元）
+  const savedRef = useRef(new Map<string, { draft: string; support: string; other: string }>()); // 最後に保存した内容
+  const pendingRef = useRef<{ key: string; store: string; period: string; snap: Snapshot } | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chainRef = useRef<Promise<void>>(Promise.resolve());
+  const latestKeyRef = useRef("");
+
+  const applySnapshot = useCallback((snap: Snapshot, data: InvoiceData) => {
+    const d = snap.draft;
+    const mKeys = rowKeys(data.maintenance);
+    const aKeys = rowKeys(data.apika);
+    const mp: Record<number, number> = {};
+    mKeys.forEach((k, i) => { if (d.maintenancePrices[k]) mp[i] = d.maintenancePrices[k]; });
+    const ao: Record<number, string> = {};
+    aKeys.forEach((k, i) => { if (d.apikaPriceOverrides[k] !== undefined) ao[i] = d.apikaPriceOverrides[k]; });
+    setMaintenancePrices(mp);
+    setApikaPriceOverrides(ao);
+    setMaintenanceManualRows(d.maintenanceManualRows);
+    setHirockManualRows(d.hirockManualRows);
+    setIncludeDisposalFee(d.includeDisposalFee);
+    setSystemFeeOverride(d.systemFeeOverride);
+    setRegMaintOverride(d.regMaintOverride);
+    setSupportRows([
+      ...snap.support.map((r) => ({
+        date: toIsoDate(r.date),
+        itemName: r.itemName,
+        hours: String(r.hours),
+        unitPrice: String(r.unitPrice),
+        storeName: r.storeName,
+      })),
+      ...d.supportPending,
+    ]);
+    setOtherRows(snap.other.map((o) => ({
+      date: o.date,
+      itemName: o.itemName,
+      quantity: String(o.quantity),
+      unitPrice: String(o.unitPrice),
+      note: o.note,
+    })));
+    setOtherVisible(d.otherVisible);
+  }, []);
+
+  // 保存キューに積んで順番に保存（変わった部分だけ書き込む）
+  const flushSave = useCallback(() => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    const p = pendingRef.current;
+    if (!p) return;
+    pendingRef.current = null;
+    chainRef.current = chainRef.current.then(async () => {
+      const last = savedRef.current.get(p.key);
+      const parts = {
+        draft: JSON.stringify(p.snap.draft),
+        support: JSON.stringify(p.snap.support),
+        other: JSON.stringify(p.snap.other),
+      };
+      if (last && last.draft === parts.draft && last.support === parts.support && last.other === parts.other) return;
+      setSaveStatus("saving");
+      try {
+        const tasks: Promise<unknown>[] = [];
+        if (!last || last.draft !== parts.draft) tasks.push(saveDraft(p.store, p.period, p.snap.draft));
+        if (!last || last.support !== parts.support) tasks.push(replaceSupportRows(p.store, p.period, p.snap.support));
+        if (!last || last.other !== parts.other) tasks.push(saveOtherItems(p.store, p.period, p.snap.other));
+        await Promise.all(tasks);
+        savedRef.current.set(p.key, parts);
+        setSaveStatus("saved");
+        setSaveError("");
+      } catch (e) {
+        setSaveStatus("error");
+        setSaveError(e instanceof Error ? e.message : "保存に失敗しました");
+      }
+    });
+  }, []);
+
   const loadInvoice = useCallback((store: string, period: string) => {
     if (!store || !period) return;
+    const key = `${store}|${period}`;
+    latestKeyRef.current = key;
     setErrorMsg("");
     startTransition(async () => {
       try {
-        const [apika, maintenance, hirock, support, partner, others] = await Promise.all([
+        const [apika, maintenance, hirock, support, partner, others, savedDraft] = await Promise.all([
           fetchApikaRows(store, period),
           fetchMaintenanceRows(store, period),
           fetchHirockRows(store, period),
           fetchSupportRows(store, period),
           fetchPartnerInfo(store),
           fetchOtherItems(store, period),
+          fetchDraft(store, period),
         ]);
-        setInvoiceData({ apika, maintenance, hirock, support });
+        // 読み込み中に別の店舗・期間へ切り替わっていたら捨てる
+        if (latestKeyRef.current !== key) return;
+        const data: InvoiceData = { apika, maintenance, hirock, support };
+        const defaultDraft: Draft = {
+          maintenancePrices: {},
+          maintenanceManualRows: [],
+          hirockManualRows: [],
+          includeDisposalFee: true,
+          apikaPriceOverrides: {},
+          systemFeeOverride: null,
+          regMaintOverride: null,
+          otherVisible: others.length > 0,
+          supportPending: [],
+        };
+        // 画面内キャッシュ（直前に入力した内容）を優先し、無ければシートの保存内容を使う
+        const snap: Snapshot = cacheRef.current.get(key) ?? {
+          draft: { ...defaultDraft, ...((savedDraft as Partial<Draft> | null) ?? {}) },
+          support,
+          other: others,
+        };
+        setInvoiceData(data);
         setPartnerInfo(partner);
-        // 保存済みのその他請求項目があれば表示ON
-        setOtherRows(others.map((o) => ({
-          date: o.date,
-          itemName: o.itemName,
-          quantity: String(o.quantity),
-          unitPrice: String(o.unitPrice),
-          note: o.note,
-        })));
-        setOtherVisible(others.length > 0);
-        setOtherDirty(false);
-        setOtherMsg("");
+        applySnapshot(snap, data);
+        setHydratedKey(key);
       } catch (e) {
         setErrorMsg(e instanceof Error ? e.message : "データ取得に失敗しました");
       }
     });
-  }, []);
+  }, [applySnapshot]);
 
-  // 店名・期間が変わったら自動で再取得し、金額入力もリセット
+  // 店名・期間が変わったら、入力途中の内容をすぐ保存してから再取得
   useEffect(() => {
+    flushSave();
+    setHydratedKey("");
     setMaintenancePrices({});
     setIncludeDisposalFee(true);
     setHirockManualRows([]);
     setMaintenanceManualRows([]);
+    setApikaPriceOverrides({});
+    setSystemFeeOverride(null);
+    setRegMaintOverride(null);
+    setSupportRows([]);
+    setOtherRows([]);
+    setOtherVisible(false);
     if (selectedStore && selectedPeriod) {
       loadInvoice(selectedStore, selectedPeriod);
     } else {
+      latestKeyRef.current = "";
       setInvoiceData(null);
     }
-  }, [selectedStore, selectedPeriod, hirockRefreshKey, loadInvoice]);
+  }, [selectedStore, selectedPeriod, hirockRefreshKey, loadInvoice, flushSave]);
 
   // 液剤代：単価は 手動上書き > 店舗マスタ > APIKAシート の優先順
   const apikaRows = (invoiceData?.apika ?? []).map((r, i) => {
@@ -188,7 +308,13 @@ export function InvoiceDashboard({
   });
   const apikaTotal = apikaRows.reduce((s, r) => s + r.total, 0);
   const hirockTotal = invoiceData?.hirock.reduce((s, r) => s + r.total, 0) ?? 0;
-  const supportTotal = invoiceData?.support.reduce((s, r) => s + r.total, 0) ?? 0;
+  // 現場応援（日付・時間が入った行だけ請求に含める）
+  const supportLines: SupportRow[] = supportRows.filter(isSupportComplete).map((e) => {
+    const hours = parseFloat(e.hours) || 0;
+    const unit = parseFloat(e.unitPrice) || 0;
+    return { date: e.date, storeName: e.storeName || selectedStore, itemName: e.itemName || "現場応援", hours, unitPrice: unit, total: hours * unit };
+  });
+  const supportTotal = supportLines.reduce((s, r) => s + r.total, 0);
   // 消耗品手動追加分の合計
   const hirockManualTotal = hirockManualRows.reduce((s, r) => {
     const qty = parseFloat(r.quantity) || 0;
@@ -228,52 +354,72 @@ export function InvoiceDashboard({
   const otherTotal = otherLines.reduce((s, r) => s + r.amount, 0);
   const grandTotal = apikaTotal + (hirockTotal + hirockManualTotal) + maintenanceAmount + disposalFeeAmount + regMaintAmount + supportTotal + systemFee + dialpadFee + microfiberFee + otherTotal + royaltyAmountExTax;
 
-  async function handleSaveOther() {
-    if (!selectedStore || !selectedPeriod) return;
-    const items: OtherItem[] = otherRows
-      .filter((r) => r.itemName.trim())
-      .map((r) => ({
-        date: r.date,
-        itemName: r.itemName.trim(),
-        quantity: parseFloat(r.quantity) || 0,
-        unitPrice: parseFloat(r.unitPrice) || 0,
-        note: r.note,
-      }));
-    setOtherSaving(true);
-    setOtherMsg("保存中...");
-    try {
-      const n = await saveOtherItems(selectedStore, selectedPeriod, items);
-      setOtherDirty(false);
-      setOtherMsg(n > 0 ? `${n} 件を保存しました。` : "保存しました（項目なし）。");
-    } catch (e) {
-      setOtherMsg(e instanceof Error ? e.message : "保存に失敗しました。");
-    } finally {
-      setOtherSaving(false);
-    }
-  }
+  // ---- 入力内容のスナップショットを作り、変化したら1秒後に自動保存 ----
+  const snapshot: Snapshot | null =
+    invoiceData && hydratedKey && hydratedKey === currentKey
+      ? (() => {
+          const mKeys = rowKeys(invoiceData.maintenance);
+          const aKeys = rowKeys(invoiceData.apika);
+          const maintenancePricesByKey: Record<string, number> = {};
+          Object.entries(maintenancePrices).forEach(([i, v]) => { if (v > 0 && mKeys[+i]) maintenancePricesByKey[mKeys[+i]] = v; });
+          const apikaByKey: Record<string, string> = {};
+          Object.entries(apikaPriceOverrides).forEach(([i, v]) => { if (aKeys[+i]) apikaByKey[aKeys[+i]] = v; });
+          return {
+            draft: {
+              maintenancePrices: maintenancePricesByKey,
+              maintenanceManualRows,
+              hirockManualRows,
+              includeDisposalFee,
+              apikaPriceOverrides: apikaByKey,
+              systemFeeOverride,
+              regMaintOverride,
+              otherVisible,
+              supportPending: supportRows.filter((e) => !isSupportComplete(e)),
+            },
+            support: supportLines,
+            other: otherRows
+              .filter((r) => r.itemName.trim())
+              .map((r) => ({
+                date: r.date,
+                itemName: r.itemName.trim(),
+                quantity: parseFloat(r.quantity) || 0,
+                unitPrice: parseFloat(r.unitPrice) || 0,
+                note: r.note,
+              })),
+          };
+        })()
+      : null;
+  const snapshotJson = snapshot ? JSON.stringify(snapshot) : "";
 
-  async function handleSaveSupport() {
-    if (!selectedStore || !selectedPeriod) return;
-    const valid = supportEntries.filter((e) => e.date && e.hours && e.unitPrice);
-    if (valid.length === 0) { setSupportMsg("入力内容を確認してください。"); return; }
-    setSupportSaving(true);
-    setSupportMsg("保存中...");
-    try {
-      const rows: SupportRow[] = valid.map((e) => {
-        const hours = parseFloat(e.hours) || 0;
-        const unit = parseFloat(e.unitPrice) || 0;
-        return { date: e.date, storeName: selectedStore, itemName: e.itemName || "現場応援", hours, unitPrice: unit, total: hours * unit };
+  useEffect(() => {
+    if (!snapshot || !currentKey) return;
+    cacheRef.current.set(currentKey, snapshot);
+    // 読み込み直後の最初の内容は「保存済み」とみなす（読み込んだだけで書き込まない）
+    if (!savedRef.current.has(currentKey)) {
+      savedRef.current.set(currentKey, {
+        draft: JSON.stringify(snapshot.draft),
+        support: JSON.stringify(snapshot.support),
+        other: JSON.stringify(snapshot.other),
       });
-      await appendSupportRows(rows);
-      setSupportMsg(`${rows.length} 件を保存しました。`);
-      setSupportEntries([emptySupportEntry()]);
-      loadInvoice(selectedStore, selectedPeriod);
-    } catch (e) {
-      setSupportMsg(e instanceof Error ? e.message : "保存に失敗しました。");
-    } finally {
-      setSupportSaving(false);
+      return;
     }
-  }
+    pendingRef.current = { key: currentKey, store: selectedStore, period: selectedPeriod, snap: snapshot };
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(flushSave, 1000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshotJson]);
+
+  // 保存が終わる前にページを閉じようとしたら警告
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (pendingRef.current || saveStatus === "saving") {
+        flushSave();
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [saveStatus, flushSave]);
 
   function handleCsvDownload() {
     if (!invoiceData || !selectedStore || !selectedPeriod) return;
@@ -355,9 +501,9 @@ export function InvoiceDashboard({
     }
 
     // 4. 現場応援セクション
-    if (d.support.length > 0) {
+    if (supportLines.length > 0) {
       details.push({ date: "", name: "【現場応援】", qty: 0, unitPrice: 0, amount: 0, isHeader: true });
-      d.support.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.hours, unitPrice: r.unitPrice, amount: r.total }));
+      supportLines.forEach((r) => details.push({ date: normalizeDate(r.date), name: r.itemName, qty: r.hours, unitPrice: r.unitPrice, amount: r.total }));
     }
 
     // 5. システム利用料セクション
@@ -703,7 +849,14 @@ ${otherLines.length > 0 ? `<div class="section">
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-semibold text-foreground">{selectedStore} 御中</p>
-          <p className="text-xs text-muted-foreground mt-0.5">{selectedPeriod}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {selectedPeriod}
+            <span className="ml-3">
+              {saveStatus === "saving" && <span className="text-muted-foreground">自動保存中…</span>}
+              {saveStatus === "saved" && <span className="text-green-600">✓ 自動保存済み</span>}
+              {saveStatus === "error" && <span className="text-red-600" title={saveError}>自動保存に失敗しました（もう一度入力すると再保存します）</span>}
+            </span>
+          </p>
         </div>
         {invoiceData && (
           <div className="flex gap-2">
@@ -1029,7 +1182,7 @@ ${otherLines.length > 0 ? `<div class="section">
                       type="number"
                       min={0}
                       value={regMaintInput}
-                      onChange={(e) => setRegMaintInput(e.target.value)}
+                      onChange={(e) => setRegMaintOverride(e.target.value)}
                       className="w-32 rounded border border-border bg-card px-2 py-1 text-right text-sm text-foreground tabular-nums focus:outline-none focus:ring-1 focus:ring-primary/20"
                       placeholder="金額を入力"
                     />
@@ -1047,82 +1200,48 @@ ${otherLines.length > 0 ? `<div class="section">
             </InvoiceSection>
           )}
 
-          {/* 4. 現場応援 */}
+          {/* 4. 現場応援（入力すると自動保存） */}
           <InvoiceSection title="現場応援" color="bg-orange-500" total={supportTotal} isEmpty={false}>
-            {/* 保存済みデータ表示 */}
-            {invoiceData && invoiceData.support.length > 0 && (
+            {supportRows.length > 0 && (
               <table className="w-full text-xs">
                 <thead>
                   <tr className="border-b border-border bg-muted/40">
-                    <th className="px-4 py-2 text-left font-semibold text-muted-foreground">日付</th>
-                    <th className="px-4 py-2 text-left font-semibold text-muted-foreground">項目名</th>
-                    <th className="px-4 py-2 text-right font-semibold text-muted-foreground">時間</th>
-                    <th className="px-4 py-2 text-right font-semibold text-muted-foreground">単価</th>
-                    <th className="px-4 py-2 text-right font-semibold text-muted-foreground">合計</th>
+                    <th className="px-3 py-2 text-left font-semibold text-muted-foreground">日付</th>
+                    <th className="px-3 py-2 text-left font-semibold text-muted-foreground">項目名</th>
+                    <th className="px-3 py-2 text-right font-semibold text-muted-foreground">時間</th>
+                    <th className="px-3 py-2 text-right font-semibold text-muted-foreground">単価</th>
+                    <th className="px-3 py-2 text-right font-semibold text-muted-foreground">合計</th>
+                    <th className="px-3 py-2 text-center font-semibold text-muted-foreground">削除</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {invoiceData.support.map((r, i) => (
-                    <tr key={i} className={`border-b border-border ${i % 2 === 0 ? "bg-card" : "bg-muted/20"}`}>
-                      <td className="px-4 py-2.5 text-foreground tabular-nums">{r.date}</td>
-                      <td className="px-4 py-2.5 text-foreground">{r.itemName}</td>
-                      <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{r.hours}</td>
-                      <td className="px-4 py-2.5 text-right text-foreground tabular-nums">{fmt(r.unitPrice)}</td>
-                      <td className="px-4 py-2.5 text-right font-semibold text-foreground tabular-nums">{fmt(r.total)}</td>
-                    </tr>
-                  ))}
+                  {supportRows.map((entry, i) => {
+                    const set = (patch: Partial<SupportEntry>) =>
+                      setSupportRows((prev) => prev.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+                    const complete = isSupportComplete(entry);
+                    return (
+                      <tr key={i} className={`border-b border-border ${complete ? "" : "bg-amber-50/60"}`}>
+                        <td className="px-3 py-1.5"><input type="date" value={entry.date.replace(/\//g, "-")} onChange={(e) => set({ date: e.target.value })} className="rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" /></td>
+                        <td className="px-3 py-1.5"><input type="text" value={entry.itemName} onChange={(e) => set({ itemName: e.target.value })} className="w-full rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" /></td>
+                        <td className="px-3 py-1.5 text-right"><input type="number" min={0} step={0.5} value={entry.hours} onChange={(e) => set({ hours: e.target.value })} className="w-20 text-right rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" /></td>
+                        <td className="px-3 py-1.5 text-right"><input type="number" min={0} value={entry.unitPrice} onChange={(e) => set({ unitPrice: e.target.value })} className="w-24 text-right rounded border border-border bg-card px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" /></td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-foreground">
+                          {complete ? fmt((parseFloat(entry.hours) || 0) * (parseFloat(entry.unitPrice) || 0)) : <span className="text-amber-700">日付・時間を入力</span>}
+                        </td>
+                        <td className="px-3 py-1.5 text-center">
+                          <button onClick={() => setSupportRows((prev) => prev.filter((_, j) => j !== i))} className="text-red-500 text-xs border border-red-200 rounded px-2 py-0.5 hover:bg-red-50">削除</button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             )}
-
-            {/* 入力フォーム */}
-            <div className="p-4 space-y-3 border-t border-border">
-              <p className="text-xs font-semibold text-muted-foreground">新規追加</p>
-              {supportEntries.map((entry, i) => (
-                <div key={i} className="grid grid-cols-2 gap-2 sm:grid-cols-5 items-end">
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs text-muted-foreground">日付</label>
-                    <input type="date" value={entry.date}
-                      onChange={(e) => setSupportEntries((prev) => prev.map((r, j) => j === i ? { ...r, date: e.target.value } : r))}
-                      className="rounded border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs text-muted-foreground">項目名</label>
-                    <input type="text" value={entry.itemName}
-                      onChange={(e) => setSupportEntries((prev) => prev.map((r, j) => j === i ? { ...r, itemName: e.target.value } : r))}
-                      className="rounded border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs text-muted-foreground">時間</label>
-                    <input type="number" min={0} step={0.5} value={entry.hours}
-                      onChange={(e) => setSupportEntries((prev) => prev.map((r, j) => j === i ? { ...r, hours: e.target.value } : r))}
-                      className="rounded border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs text-muted-foreground">単価</label>
-                    <input type="number" min={0} value={entry.unitPrice}
-                      onChange={(e) => setSupportEntries((prev) => prev.map((r, j) => j === i ? { ...r, unitPrice: e.target.value } : r))}
-                      className="rounded border border-border bg-card px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary/20" />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs text-muted-foreground">合計</label>
-                    <div className="rounded border border-border bg-muted px-2 py-1.5 text-xs text-foreground tabular-nums">
-                      {fmt((parseFloat(entry.hours) || 0) * (parseFloat(entry.unitPrice) || 0))}
-                    </div>
-                  </div>
-                </div>
-              ))}
-              <div className="flex items-center gap-2">
-                <button onClick={() => setSupportEntries((prev) => [...prev, emptySupportEntry()])}
-                  className="rounded border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition">
-                  + 行を追加
-                </button>
-                <button onClick={handleSaveSupport} disabled={supportSaving}
-                  className="rounded bg-primary px-4 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50">
-                  {supportSaving ? "保存中..." : "スプレッドシートに保存"}
-                </button>
-                {supportMsg && <span className="text-xs text-muted-foreground">{supportMsg}</span>}
-              </div>
+            <div className="px-4 py-3 border-t border-border">
+              <button onClick={() => setSupportRows((prev) => [...prev, emptySupportEntry()])}
+                className="rounded border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition">
+                + 行を追加
+              </button>
             </div>
           </InvoiceSection>
 
@@ -1142,7 +1261,7 @@ ${otherLines.length > 0 ? `<div class="section">
                   type="number"
                   min={0}
                   value={systemFeeInput}
-                  onChange={(e) => setSystemFeeInput(e.target.value)}
+                  onChange={(e) => setSystemFeeOverride(e.target.value)}
                   className={`w-32 rounded border px-2 py-1 text-right text-sm text-foreground tabular-nums focus:outline-none focus:ring-1 ${isSystemFeeUnfilled ? "border-red-400 bg-red-50 focus:ring-red-300" : "border-border bg-card focus:ring-primary/20"}`}
                   placeholder="金額を入力"
                 />
@@ -1223,11 +1342,6 @@ ${otherLines.length > 0 ? `<div class="section">
                 </table>
                 <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-border">
                   <button onClick={() => updateOtherRows((p) => [...p, emptyOtherRow()])} className="rounded border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition">+ 行を追加</button>
-                  <button onClick={handleSaveOther} disabled={otherSaving} className="rounded bg-primary px-4 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90 transition disabled:opacity-50">
-                    {otherSaving ? "保存中..." : "スプレッドシートに保存"}
-                  </button>
-                  {otherDirty && !otherSaving && <span className="text-xs text-amber-600">未保存の変更があります</span>}
-                  {otherMsg && <span className="text-xs text-muted-foreground">{otherMsg}</span>}
                 </div>
               </div>
             ) : (
